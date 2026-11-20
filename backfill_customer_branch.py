@@ -456,7 +456,7 @@ def audit_saved_document(client, folder, module, identifier, identity):
 
 class Store:
     def __init__(self, path, rows, identity):
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""

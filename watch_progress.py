@@ -68,12 +68,20 @@ def publish(folder, state):
         file.write(json.dumps(state) + "\n")
 
 
+def should_stop(state, once, keep_running_on_halt):
+    if once or state["remaining"] == 0:
+        return True
+    return (state["halted"] or state["failed"]) and not keep_running_on_halt
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("output/corrected_run"))
     parser.add_argument("--interval", type=int, default=300)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--live", action="store_true", help="Report verified live invoice completions")
+    parser.add_argument("--keep-running-on-halt", action="store_true",
+                        help="Continue read-only updates when failures or a halt are recorded")
     args = parser.parse_args(argv)
     if args.interval < 1:
         parser.error("interval must be positive")
@@ -106,7 +114,10 @@ def main(argv=None):
                 state["measurement_seconds"] = round(now - previous_time) if previous_time is not None else 0
                 previous_verified, previous_time = state["updated_verified"], now
             if state["halted"] or state["failed"]:
-                state["monitor_status"] = "Failures or halt recorded; check the run terminal"
+                state["monitor_status"] = (
+                    "Failures or halt recorded; read-only monitoring continues"
+                    if args.keep_running_on_halt else
+                    "Failures or halt recorded; check the run terminal")
             elif state["remaining"] == 0:
                 state["monitor_status"] = ("Processing finished; review failures/conflicts and final report" if args.live
                                            else "All rows reviewed; reports and live verification still required")
@@ -117,7 +128,7 @@ def main(argv=None):
             publish(folder, state)
             print(f"{state['checked_utc']} {state['reviewed']}/{state['total']} "
                   f"({state['percent_reviewed']}%); {state['monitor_status']}", flush=True)
-            if args.once or state["remaining"] == 0 or state["halted"] or state["failed"]:
+            if should_stop(state, args.once, args.keep_running_on_halt):
                 return
             time.sleep(args.interval)
 

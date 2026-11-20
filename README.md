@@ -56,6 +56,24 @@ To bound an invocation to 100 unfinished rows:
 .\.venv\Scripts\python.exe run_invoice_backfill.py --run --limit 100
 ```
 
+### Continue while invoices 157368, 160059, and 161528 remain unresolved
+
+Invoice 157368 has a saved HTTP 401 failure and an unresolved branch field. Invoice 160059 has a successful branch write, but later reads showed customer-balance and stock changes beyond the narrow reconciliation that was approved. Invoice 161528 received an HTTP 401/code 57 rejection and its branch remains blank. These invoices must not be retried or counted as complete. Each isolation option validates the exact saved evidence before excluding that invoice; the options also clear only the matching saved halt. The 161528 isolation additionally requires both prior 157368 and 160059 isolation markers. Pending-only runs process `pending` rows only and stop automatically once the journal records **8,000** invoices as `updated_verified` or `already_correct`; an explicit larger limit cannot pass that threshold. The default batch remains 100 pending invoices. To isolate 161528 and continue up to the target:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-161528-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For subsequent batches before reaching 8,000, use:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --continue-pending --limit 7888 --requests-per-minute 90
+```
+
+Any other failed invoice or different active halt stops continuation. Do not use `--run` while an isolated failure remains. None of the three invoices is counted as complete; resolve and reconcile them separately before declaring the invoice backfill complete.
+
+If a later invoice hits the daily quota halt, wait until the allowance is restored and reconcile that invoice with `--reconcile-429`; then resume with `--continue-pending`.
+
 The default request cap is 90/minute. Other integrations share the organisation's allowance. Parallel copies cannot increase that allowance.
 
 ### Automatic five-minute reports
@@ -68,7 +86,13 @@ Run this in a second terminal after the updater resumes:
 
 Open [the invoice progress report](output/corrected_run/invoice_field_id_run/monitor/progress.md) in VS Code. It shows verified updates, already-correct invoices, remaining rows, failures, conflicts and new verified updates since the previous check. The first check establishes a baseline.
 
-The monitor reads local SQLite data, needs no credentials and makes no Zoho requests. It has a separate lock and stops after completion or a failure/halt. Restart it after recovery. Reports update locally, not automatically in chat.
+To keep the five-minute updates running while an isolated failure/halt remains, add `--keep-running-on-halt`:
+
+```powershell
+.\.venv\Scripts\python.exe watch_progress.py --output .\output\corrected_run\invoice_field_id_run --live --interval 300 --keep-running-on-halt
+```
+
+The monitor reads local SQLite data, needs no credentials and makes no Zoho requests. It has a separate lock and stops after completion. Without `--keep-running-on-halt`, it stops on a failure/halt; with the flag, it continues reporting the halt status every interval. Reports update locally, not automatically in chat.
 
 For a single snapshot:
 
@@ -82,7 +106,7 @@ For a single snapshot:
 2. Read its custom-fields endpoint to establish the branch value. An omitted lookup in the invoice response alone is not proof of emptiness. Populated or conflicting representations block a new assignment.
 3. Commit the original document, request evidence and attempted state to SQLite.
 4. Send only the Customer Branch field ID and mapped branch record ID using `PUT /invoices/{invoice_id}`. Do not resubmit customer, lines or totals.
-5. Read back the invoice. Verify the expected branch and unchanged protected data before marking it complete. Post-write branch omission cannot pass verification.
+5. Read back the invoice. Verify the expected branch and unchanged protected data before marking it complete. If the target field is omitted from both the pre-write and post-write invoice responses, the dedicated custom-fields endpoint may verify the branch; any populated/conflicting representation or protected-data difference blocks completion.
 
 Comparison covers returned customer identity, lines, amounts, payments, status, other custom fields and fiscal details. The invoice runner excludes target branch representations, known modification audit fields and the previously investigated generated `CInvoiceID` token in a recognised payment URL. Other URL changes remain protected.
 
@@ -174,9 +198,9 @@ The exact map bytes, organisation, endpoints and field ID are bound to the journ
 | `output/corrected_run/invoice_field_id_run/summary.json` | Invoice status totals |
 | `output/corrected_run/invoice_field_id_run/monitor/` | Progress snapshots, history and separate monitor reports |
 
-The current runner depends on the original investigation database and its invoice 152522 snapshot. Startup verifies that this invoice's targeted repair still matches its original business data and expected branch. This is a continuation of the reviewed project, not a generic updater that can start with only a CSV.
+The current runner depends on the original investigation database and its invoice 152522 snapshot. When creating a new invoice journal, startup verifies that this invoice's targeted repair still matches its original business data and expected branch. Once the separate invoice journal exists, `--continue-pending` and `--reconcile-stock-only` use that journal's bound map, organisation and field identity instead of rereading the unrelated 152522 invoice. This is a continuation of the reviewed project, not a generic updater that can start with only a CSV.
 
-SQLite holds original documents and timestamped `evidence:*` records for requests, outcomes, readbacks and differences. API rejection evidence may also appear in `access_error_*.json`. These files can contain customer data. Retain the whole output directory, restrict access, and back it up before journal maintenance. Never delete evidence or halt markers to force a retry.
+SQLite holds original documents and timestamped `evidence:*` records for requests, outcomes, readbacks and differences. The journal writer waits up to 30 seconds for transient database contention; still run only one invoice updater at a time. If a lock persists, retain the exact error and do not delete the database, lock file or evidence. API rejection evidence may also appear in `access_error_*.json`. These files can contain customer data. Retain the whole output directory, restrict access, and back it up before journal maintenance. Never delete evidence or halt markers to force a retry.
 
 `.gitignore` excludes credentials, local data, output, databases, logs and the virtual environment. Review staged files before committing; ignoring does not untrack files already committed. Repository visibility has not been verified. Do not publish customer data or credentials.
 
@@ -190,6 +214,7 @@ SQLite holds original documents and timestamped `evidence:*` records for request
 | HTTP 429, code 44 | Per-minute restriction; coordinate other integrations and reduce the request cap. |
 | `Invoice-only run halted` | Inspect saved request, response and readback before recovery. Restarting does not clear it. |
 | `Recovery is restricted...` | The halt does not match the narrow recovery procedure, or recovery already completed. Inspect saved state. |
+| `429 recovery ...` | The single-invoice recovery guards did not pass. Keep the halt and inspect saved evidence; do not edit SQLite. |
 | Protected-data differences | Keep the halt and investigate exact differences. Do not relax comparisons to continue. |
 | Credit-note code 12069 | Associated Invoice Number required for the tested update. Do not invent a link. |
 | Credit-note code 120121 | Dedicated endpoint rejected the field index. Do not substitute another field's index. |
@@ -202,7 +227,55 @@ For the **specific old halt** `Read failed after bounded retries`, this controll
 
 It requires exactly one saved attempted invoice, its expected request and a successful write response. It reads without rewriting the invoice. Verified branch and unchanged business data allow it to back up the invoice journal, mark the row verified and atomically clear that specific halt.
 
-**It does not recover the current `API rejected request (HTTP 429)` halt.** After quota restoration, that case still needs evidence-based recovery. Do not repeatedly run the command or manually clear the flag.
+For the specific uncertain HTTP 429 attempt on invoice **156416**, after Zoho access and allowance are restored, use this guarded recovery:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --reconcile-429 --requests-per-minute 90
+```
+
+It requires the exact saved 429 halt, one actionable failed invoice, the original branch-only request and its uncertain-write evidence. When `--continue-pending` is active, it excludes only invoices with exact saved isolation markers (157368 and, if explicitly approved, 160059). It takes a fresh invoice read and custom-fields read, checks the approved branch and compares protected business data with the saved original. If the expected branch is already present, it records the invoice as verified without another write. If the branch is still blank and business data is unchanged, it backs up the journal and makes one branch-only retry followed by verification. Conflicts, differences, ambiguous evidence, or API failures retain the halt. Do not run this during quota exhaustion or edit the journal manually.
+
+After this recovery succeeds and clears the halt, resume with `--run`, unless a pending-continuation marker exists; in that case, resume with `--continue-pending`.
+
+For the specific uncertain write on invoice **157368** where the normal invoice response omits Customer Branch, use:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --reconcile-omitted-field --requests-per-minute 90
+```
+
+This command is restricted to that invoice and exact saved attempt. It compares a fresh invoice response with the saved business-data snapshot and checks the dedicated custom-fields endpoint. If the mapped branch is already present, it records verification without another write. If the branch is still blank and all checks remain consistent, it backs up the journal, sends one branch-only retry, then verifies unchanged invoice data and the branch. When the full invoice response still omits the target field, the dedicated endpoint supplies the branch verification. Conflicts, differences, ambiguous evidence, or API failures retain the halt. After it succeeds, resume with `--run`.
+
+If that exact retry is rejected with HTTP 404/code 1002 (`Inactive template cannot be used`) and an administrator confirms HQ Template is active in the approved organisation, one further attempt is available:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --retry-inactive-template --confirm-template-active --requests-per-minute 90
+```
+
+This mode requires the saved 404 response, rechecks the template-bound invoice snapshot and blank branch, and allows only one more branch-only update. If it is rejected or cannot be verified, the halt remains.
+
+If that retry is also rejected with code 1002, Zoho documents a dedicated [Update custom field in existing invoices](https://www.zoho.com/books/api/v3/invoices/#update-custom-field-in-existing-invoices) endpoint at `PUT /invoice/{invoice_id}/customfields`. This restricted final recovery command uses that endpoint once for invoice 157368:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --retry-dedicated-customfield --requests-per-minute 90
+```
+
+It verifies the exact saved 404 history, rechecks the invoice snapshot and current branch, backs up the journal, and sends only the Customer Branch field. It clears the halt only after readback and branch verification. If it fails, do not retry again or resume the batch; contact Zoho Support.
+
+If the dedicated write is rejected with HTTP 401/code 57, a user with invoice edit access can set the Customer Branch field on invoice 157368 in Zoho Books to the mapped branch. Then run this read-only reconciliation:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --reconcile-manual-branch
+```
+
+It compares the invoice's protected data with the saved snapshot and verifies the mapped branch through the custom-fields endpoint. It does not write to Zoho and clears the halt only if both checks pass. If it succeeds, resume the remaining invoices with `--run`; if it fails, keep the halt and investigate.
+
+For the specific successful write on invoice **160059**, a guarded read-only reconciliation was attempted:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --reconcile-stock-only
+```
+
+The fresh reads found changes outside the five recorded stock-availability fields, including customer balance and stock values on multiple line items. The reconciliation therefore stops and keeps the halt; do not broaden its allowed-differences list. If the owner explicitly approves isolating 160059 instead, use `--isolate-160059-and-continue` above. This never marks 160059 verified and never writes to that invoice.
 
 After Ctrl+C or a crash with no saved halt, normal startup reads `updating` rows. Verified saved results are not rewritten. An uncertain request with a blank result remains blocked. If interrupted before any request was journalled, the original is retained as evidence before the row is reset.
 
