@@ -52,7 +52,6 @@ STOCK_ONLY_DIFFERENCE_PATHS = {
     "/line_items/4/available_stock",
     "/line_items/4/stock_on_hand",
 }
-PENDING_CONTINUATION_VERIFIED_TARGET = 8000
 
 
 def lookup(client, row, field_id):
@@ -1048,9 +1047,12 @@ def should_process_invoice(status, continue_pending):
     return status not in ("updated_verified", "already_correct", "conflict")
 
 
-def pending_continuation_batch_limit(completed, requested_limit):
-    remaining_to_target = max(0, PENDING_CONTINUATION_VERIFIED_TARGET - completed)
-    return min(requested_limit, remaining_to_target)
+def progress_line(checked, batch_total, summary):
+    verified = summary["updated_verified"] + summary["already_correct"]
+    total = summary["total_mapped"]
+    percent = 100 * verified / total if total else 0
+    return ("Progress: batch {:,}/{:,}; verified {:,}/{:,} ({:.1f}%); {:,} pending."
+            .format(checked, batch_total, verified, total, percent, summary["pending"]))
 
 
 def should_verify_investigated_invoice(continue_pending, reconcile_stock_only, journal_exists):
@@ -1198,16 +1200,16 @@ def main():
                 return
             batch_limit = args.limit
             if continue_pending:
-                completed = store.db.execute(
+                eligible = store.db.execute(
+                    "SELECT count(*) FROM documents WHERE status='pending'").fetchone()[0]
+            else:
+                eligible = store.db.execute(
                     "SELECT count(*) FROM documents "
-                    "WHERE status IN ('updated_verified','already_correct')").fetchone()[0]
-                batch_limit = pending_continuation_batch_limit(completed, args.limit)
-                if batch_limit == 0:
-                    print(dumps(store.report(folder)), flush=True)
-                    print("Reached the target of %s correct and verified invoices; stopping without "
-                          "processing more pending invoices." %
-                          PENDING_CONTINUATION_VERIFIED_TARGET, flush=True)
-                    return
+                    "WHERE status NOT IN ('updated_verified','already_correct','conflict')").fetchone()[0]
+            batch_total = min(eligible, batch_limit)
+            initial_summary = store.report(folder)
+            print(progress_line(0, batch_total, initial_summary), flush=True)
+            last_progress_at = 0
             checked = 0
             for row in invoices:
                 saved = store.db.execute("SELECT status FROM documents WHERE type='invoice' AND zoho_id=?", (row["zoho_id"],)).fetchone()
@@ -1223,18 +1225,17 @@ def main():
                     store.halt(str(error))
                     raise
                 if checked % 10 == 0 or args.test:
-                    print(dumps(store.report(folder)), flush=True)
+                    progress = store.report(folder)
+                    print(progress_line(checked, batch_total, progress), flush=True)
+                    print(dumps(progress), flush=True)
+                    last_progress_at = checked
                 if args.test and changed:
                     break
             summary = store.report(folder)
+            if checked != last_progress_at:
+                print(progress_line(checked, batch_total, summary), flush=True)
             print(dumps(summary), flush=True)
             if continue_pending:
-                completed = summary["updated_verified"] + summary["already_correct"]
-                if completed >= PENDING_CONTINUATION_VERIFIED_TARGET:
-                    print("Reached the target of %s correct and verified invoices; stopping. "
-                          "No more pending invoices will be processed." %
-                          PENDING_CONTINUATION_VERIFIED_TARGET, flush=True)
-                    return
                 isolated_numbers = ["157368"]
                 if store.get(PENDING_CONTINUATION_160059_KEY) == PENDING_CONTINUATION_160059_MARKER:
                     isolated_numbers.append("160059")

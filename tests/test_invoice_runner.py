@@ -15,7 +15,7 @@ from run_invoice_backfill import (update_one, reconcile_read_failure,
     PENDING_CONTINUATION_160059_KEY, PENDING_CONTINUATION_160059_MARKER,
     PENDING_CONTINUATION_161528_KEY, PENDING_CONTINUATION_161528_MARKER,
     should_verify_investigated_invoice, reconcile_stock_only_difference,
-    pending_continuation_batch_limit)
+    progress_line)
 from backfill_customer_branch import document_differences
 from repair_test_invoice import projection
 from test_backfill import FakeOmittedClient, document, invoice_schema, row
@@ -436,11 +436,18 @@ class InvoiceRunnerTests(unittest.TestCase):
         self.assertFalse(should_process_invoice("updated_verified", True))
         self.assertTrue(should_process_invoice("failed", False))
 
-    def test_pending_continuation_batch_stops_at_8000_completed(self):
-        self.assertEqual(pending_continuation_batch_limit(6778, 7888), 1222)
-        self.assertEqual(pending_continuation_batch_limit(6778, 100), 100)
-        self.assertEqual(pending_continuation_batch_limit(8000, 7888), 0)
-        self.assertEqual(pending_continuation_batch_limit(8001, 7888), 0)
+    def test_progress_line_reports_batch_and_verified_counts(self):
+        summary = {
+            "updated_verified": 7,
+            "already_correct": 1,
+            "total_mapped": 20,
+            "pending": 9,
+        }
+        self.assertEqual(
+            progress_line(10, 12, summary),
+            "Progress: batch 10/12; verified 8/20 (40.0%); 9 pending.")
+        summary["total_mapped"] = 0
+        self.assertIn("verified 8/0 (0.0%)", progress_line(0, 0, summary))
 
     def test_existing_continuation_journal_does_not_depend_on_old_test_invoice(self):
         self.assertFalse(should_verify_investigated_invoice(True, False, True))

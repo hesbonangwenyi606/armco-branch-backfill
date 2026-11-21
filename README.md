@@ -58,13 +58,13 @@ To bound an invocation to 100 unfinished rows:
 
 ### Continue while invoices 157368, 160059, and 161528 remain unresolved
 
-Invoice 157368 has a saved HTTP 401 failure and an unresolved branch field. Invoice 160059 has a successful branch write, but later reads showed customer-balance and stock changes beyond the narrow reconciliation that was approved. Invoice 161528 received an HTTP 401/code 57 rejection and its branch remains blank. These invoices must not be retried or counted as complete. Each isolation option validates the exact saved evidence before excluding that invoice; the options also clear only the matching saved halt. The 161528 isolation additionally requires both prior 157368 and 160059 isolation markers. Pending-only runs process `pending` rows only and stop automatically once the journal records **8,000** invoices as `updated_verified` or `already_correct`; an explicit larger limit cannot pass that threshold. The default batch remains 100 pending invoices. To isolate 161528 and continue up to the target:
+Invoice 157368 has a saved HTTP 401 failure and an unresolved branch field. Invoice 160059 has a successful branch write, but later reads showed customer-balance and stock changes beyond the narrow reconciliation that was approved. Invoice 161528 received an HTTP 401/code 57 rejection and its branch remains blank. These invoices must not be retried or counted as complete. Each isolation option validates the exact saved evidence before excluding that invoice; the options also clear only the matching saved halt. The 161528 isolation additionally requires both prior 157368 and 160059 isolation markers. Pending-only runs process `pending` rows only, with no overall verified-invoice target. Each invocation remains bounded by `--limit` (default: 100). To isolate 161528 and continue:
 
 ```powershell
 .\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-161528-and-continue --limit 7888 --requests-per-minute 90
 ```
 
-For subsequent batches before reaching 8,000, use:
+For subsequent bounded batches, use:
 
 ```powershell
 .\.venv\Scripts\python.exe run_invoice_backfill.py --continue-pending --limit 7888 --requests-per-minute 90
@@ -84,7 +84,7 @@ Run this in a second terminal after the updater resumes:
 .\.venv\Scripts\python.exe watch_progress.py --output .\output\corrected_run\invoice_field_id_run --live --interval 300
 ```
 
-Open [the invoice progress report](output/corrected_run/invoice_field_id_run/monitor/progress.md) in VS Code. It shows verified updates, already-correct invoices, remaining rows, failures, conflicts and new verified updates since the previous check. The first check establishes a baseline.
+The updater terminal prints a progress line at startup, every 10 attempted invoices, and at batch completion. It includes the batch count and overall verified count/percentage. Open [the invoice progress report](output/corrected_run/invoice_field_id_run/monitor/progress.md) in VS Code for five-minute snapshots of verified updates, already-correct invoices, remaining rows, failures, conflicts and new verified updates since the previous check. The first monitor check establishes a baseline.
 
 To keep the five-minute updates running while an isolated failure/halt remains, add `--keep-running-on-halt`:
 
