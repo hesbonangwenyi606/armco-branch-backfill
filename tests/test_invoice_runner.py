@@ -14,6 +14,13 @@ from run_invoice_backfill import (update_one, reconcile_read_failure,
     PENDING_CONTINUATION_KEY, PENDING_CONTINUATION_MARKER,
     PENDING_CONTINUATION_160059_KEY, PENDING_CONTINUATION_160059_MARKER,
     PENDING_CONTINUATION_161528_KEY, PENDING_CONTINUATION_161528_MARKER,
+    PENDING_CONTINUATION_165534_KEY, PENDING_CONTINUATION_165534_MARKER,
+    PENDING_CONTINUATION_165818_KEY, PENDING_CONTINUATION_165818_MARKER,
+    PENDING_CONTINUATION_167764_KEY, PENDING_CONTINUATION_167764_MARKER,
+    PENDING_CONTINUATION_168436_KEY, PENDING_CONTINUATION_168436_MARKER,
+    PENDING_CONTINUATION_168777_KEY, PENDING_CONTINUATION_168777_MARKER,
+    PENDING_CONTINUATION_168812_KEY, PENDING_CONTINUATION_168812_MARKER,
+    PENDING_CONTINUATION_168905_KEY, PENDING_CONTINUATION_168905_MARKER,
     should_verify_investigated_invoice, reconcile_stock_only_difference,
     progress_line)
 from backfill_customer_branch import document_differences
@@ -109,6 +116,27 @@ class InvoiceRunnerTests(unittest.TestCase):
             "error": "Uncertain write: temporary API failure; reconcile before retry",
             "http_status": None, "response": None})
         return store, recovery_row
+
+    def failed_uncertain_read_store(self, folder, current_branch):
+        original = document(self.row)
+        store = Store(Path(folder) / "run.sqlite3", [self.row], {})
+        store.update(self.row, "failed", "Read failed after bounded retries",
+                     original=original)
+        store.record_evidence(self.row, "lookup_before", {"custom_fields": [{
+            "customfield_id": self.schema["field_id"],
+            "api_name": "cf_customer_branch", "data_type": "lookup", "value": ""}]})
+        store.record_evidence(self.row, "request", {
+            "method": "PUT", "path": "/invoices/" + self.row["zoho_id"],
+            "payload": {"custom_fields": [{
+                "customfield_id": self.schema["field_id"],
+                "value": self.row["branch_record_id"]}]}})
+        store.record_evidence(self.row, "write_error", {
+            "error": "Uncertain write: network failure; read before retry",
+            "http_status": None, "response": None})
+        store.halt("Read failed after bounded retries")
+        client = self.client()
+        client.doc = document(self.row, current_branch)
+        return store, client
 
     def failed_omitted_store(self, folder, client, current_value=""):
         recovery_row = {**self.row, "zoho_id": "1462401000002738299",
@@ -280,6 +308,642 @@ class InvoiceRunnerTests(unittest.TestCase):
         store.record_evidence(failed_row, "verification_lookup", lookup)
         store.halt(PENDING_CONTINUATION_161528_MARKER["halt_reason"])
         return failed_row
+
+    def interrupted_165534_store(self, folder, extra_difference=False):
+        store, _, _, _, _ = self.stock_only_reconciliation_store(folder)
+        prepare_pending_continuation(store, isolate_stock_failure=True)
+        self.add_unauthorized_161528_failure(store)
+        prepare_pending_continuation(store, isolate_unauthorized_failure=True)
+
+        field_id = "1462401000020819910"
+        interrupted_row = {
+            **self.row,
+            "zoho_id": PENDING_CONTINUATION_165534_MARKER["document_id"],
+            "number": PENDING_CONTINUATION_165534_MARKER["number"],
+            "branch_record_id": PENDING_CONTINUATION_165534_MARKER["branch_record_id"],
+        }
+        original = document(interrupted_row)
+        original["custom_fields"][0].update(
+            customfield_id=field_id, api_name="cf_customer_branch",
+            data_type="lookup", value="")
+        original["custom_field_hash"]["cf_customer_branch"] = ""
+        original["line_items"] = [
+            deepcopy(original["line_items"][0]),
+            deepcopy(original["line_items"][0]),
+        ]
+        stock_fields = (
+            "actual_available_for_sale_stock", "actual_available_stock",
+            "available_for_sale_stock", "available_stock", "stock_on_hand",
+            "actual_committed_stock", "committed_stock",
+        )
+        for index, item in enumerate(original["line_items"]):
+            fields = stock_fields if index == 1 else stock_fields[:5]
+            for key in fields:
+                item[key] = 100.0
+        readback = deepcopy(original)
+        readback["custom_fields"][0]["value"] = interrupted_row["branch_record_id"]
+        readback["custom_field_hash"]["cf_customer_branch"] = interrupted_row["branch_record_id"]
+        for index, item in enumerate(readback["line_items"]):
+            fields = stock_fields if index == 1 else stock_fields[:5]
+            for key in fields:
+                item[key] = 99.0
+        schema = {**self.schema, "field_id": field_id, "api_name": "cf_customer_branch"}
+        differences = document_differences(
+            projection(original, field_id, schema),
+            projection(readback, field_id, schema))
+        if extra_difference:
+            differences.append({"path": "/total", "before": 100, "after": 99})
+
+        with store.db:
+            store.db.execute("INSERT INTO documents(type,zoho_id,mapping) VALUES(?,?,?)",
+                             (interrupted_row["type"], interrupted_row["zoho_id"],
+                              json.dumps(interrupted_row)))
+        store.update(interrupted_row, "updating", original=original)
+        store.record_evidence(interrupted_row, "lookup_before", {
+            "custom_fields": [{
+                "customfield_id": field_id, "api_name": "cf_customer_branch",
+                "data_type": "lookup", "value": ""}]})
+        store.record_evidence(interrupted_row, "request", {
+            "method": "PUT",
+            "path": "/invoices/" + interrupted_row["zoho_id"],
+            "payload": {"custom_fields": [{
+                "customfield_id": field_id,
+                "value": interrupted_row["branch_record_id"]}]}})
+        for _ in range(3):
+            store.record_evidence(interrupted_row, "interruption_readback", readback)
+            store.record_evidence(interrupted_row, "business_differences", differences)
+        return store, interrupted_row
+
+    def index_only_165818_store(self, folder, extra_difference=False):
+        store, _ = self.interrupted_165534_store(folder)
+        prepare_pending_continuation(store, isolate_interrupted_stock_failure=True)
+        field_id = "1462401000020819910"
+        index_row = {
+            **self.row,
+            "zoho_id": PENDING_CONTINUATION_165818_MARKER["document_id"],
+            "number": PENDING_CONTINUATION_165818_MARKER["number"],
+            "branch_record_id": PENDING_CONTINUATION_165818_MARKER["branch_record_id"],
+        }
+        original = document(index_row)
+        original["custom_fields"] = [
+            field for field in original["custom_fields"]
+            if str(field.get("customfield_id")) != self.schema["field_id"]]
+        original["custom_fields"][0]["index"] = 1
+        original["custom_field_hash"].pop("cf_customer_branch")
+
+        readback = deepcopy(original)
+        readback["custom_fields"][0]["index"] = 2
+        readback["custom_fields"].insert(0, {
+            "customfield_id": field_id, "index": 1,
+            "api_name": "cf_customer_branch", "data_type": "lookup",
+            "value": index_row["branch_record_id"]})
+        readback["custom_field_hash"]["cf_customer_branch"] = index_row["branch_record_id"]
+        if extra_difference:
+            readback["total"] = 99
+
+        schema = {**self.schema, "field_id": field_id}
+        with store.db:
+            store.db.execute("INSERT INTO documents(type,zoho_id,mapping) VALUES(?,?,?)",
+                             (index_row["type"], index_row["zoho_id"],
+                              json.dumps(index_row)))
+        store.update(index_row, "failed", PENDING_CONTINUATION_165818_MARKER["failure"],
+                     original=original)
+        store.halt(PENDING_CONTINUATION_165818_MARKER["halt_reason"])
+        store.record_evidence(index_row, "lookup_before", {"custom_fields": [{
+            "customfield_id": field_id, "api_name": "cf_customer_branch",
+            "data_type": "lookup", "value": ""}]})
+        store.record_evidence(index_row, "request", {
+            "method": "PUT", "path": "/invoices/" + index_row["zoho_id"],
+            "payload": {"custom_fields": [{
+                "customfield_id": field_id,
+                "value": index_row["branch_record_id"]}]}})
+        store.record_evidence(index_row, "write_response", {"code": 0})
+        store.record_evidence(index_row, "readback", readback)
+        store.record_evidence(index_row, "business_differences", document_differences(
+            projection(original, field_id, schema), projection(readback, field_id, schema)))
+        return store, index_row
+
+    def unauthorized_167764_store(self, folder, extra_difference=False):
+        store, _ = self.index_only_165818_store(folder)
+        prepare_pending_continuation(store, isolate_165818_index_failure=True)
+        field_id = "1462401000020819910"
+        failed_row = {
+            **self.row,
+            "zoho_id": PENDING_CONTINUATION_167764_MARKER["document_id"],
+            "number": PENDING_CONTINUATION_167764_MARKER["number"],
+            "branch_record_id": PENDING_CONTINUATION_167764_MARKER["branch_record_id"],
+        }
+        original = document(failed_row)
+        original["custom_fields"][0].update(
+            customfield_id=field_id, api_name="cf_customer_branch",
+            data_type="lookup", value="")
+        original["custom_field_hash"]["cf_customer_branch"] = ""
+        readback = deepcopy(original)
+        if extra_difference:
+            readback["total"] = 99
+
+        with store.db:
+            store.db.execute("INSERT INTO documents(type,zoho_id,mapping) VALUES(?,?,?)",
+                             (failed_row["type"], failed_row["zoho_id"],
+                              json.dumps(failed_row)))
+        store.update(failed_row, "failed", PENDING_CONTINUATION_167764_MARKER["failure"],
+                     original=original)
+        store.halt(PENDING_CONTINUATION_167764_MARKER["halt_reason"])
+        store.record_evidence(failed_row, "lookup_before", {"custom_fields": [{
+            "customfield_id": field_id, "api_name": "cf_customer_branch",
+            "data_type": "lookup", "value": ""}]})
+        store.record_evidence(failed_row, "request", {
+            "method": "PUT", "path": "/invoices/" + failed_row["zoho_id"],
+            "payload": {"custom_fields": [{
+                "customfield_id": field_id,
+                "value": failed_row["branch_record_id"]}]}})
+        store.record_evidence(failed_row, "write_error", {
+            "error": "API rejected request (HTTP 401)", "http_status": 401,
+            "response": {"code": 57,
+                         "message": "You are not authorized to perform this operation"}})
+        store.record_evidence(failed_row, "readback", readback)
+        store.record_evidence(failed_row, "verification_lookup", {
+            "custom_fields": [{
+                "customfield_id": field_id, "api_name": "cf_customer_branch",
+                "data_type": "lookup", "value": ""}]})
+        return store, failed_row
+
+    def index_only_168436_store(self, folder, extra_difference=False):
+        store, _ = self.unauthorized_167764_store(folder)
+        prepare_pending_continuation(store, isolate_167764_unauthorized_failure=True)
+        field_id = "1462401000020819910"
+        index_row = {
+                **self.row,
+                "zoho_id": PENDING_CONTINUATION_168436_MARKER["document_id"],
+                "number": PENDING_CONTINUATION_168436_MARKER["number"],
+                "branch_record_id": PENDING_CONTINUATION_168436_MARKER["branch_record_id"],
+        }
+        original = document(index_row)
+        original["custom_fields"] = [
+                {"customfield_id": str(100 + index), "index": index + 1,
+                 "api_name": "cf_other_{}".format(index), "value": "value"}
+                for index in range(6)]
+        original["custom_field_hash"].pop("cf_customer_branch")
+
+        readback = deepcopy(original)
+        for field in readback["custom_fields"]:
+                field["index"] += 1
+        readback["custom_fields"].insert(0, {
+                "customfield_id": field_id, "index": 1,
+                "api_name": "cf_customer_branch", "data_type": "lookup",
+                "value": index_row["branch_record_id"]})
+        readback["custom_field_hash"]["cf_customer_branch"] = index_row["branch_record_id"]
+        if extra_difference:
+                readback["total"] = 99
+
+        with store.db:
+                store.db.execute("INSERT INTO documents(type,zoho_id,mapping) VALUES(?,?,?)",
+                                 (index_row["type"], index_row["zoho_id"],
+                                  json.dumps(index_row)))
+        store.update(index_row, "failed", PENDING_CONTINUATION_168436_MARKER["failure"],
+                         original=original)
+        store.halt(PENDING_CONTINUATION_168436_MARKER["halt_reason"])
+        store.record_evidence(index_row, "lookup_before", {"custom_fields": [{
+                "customfield_id": field_id, "api_name": "cf_customer_branch",
+                "data_type": "lookup", "value": ""}]})
+        store.record_evidence(index_row, "request", {
+                "method": "PUT", "path": "/invoices/" + index_row["zoho_id"],
+                "payload": {"custom_fields": [{
+                    "customfield_id": field_id,
+                    "value": index_row["branch_record_id"]}]}})
+        store.record_evidence(index_row, "write_response", {"code": 0})
+        store.record_evidence(index_row, "readback", readback)
+        schema = {**self.schema, "field_id": field_id}
+        store.record_evidence(index_row, "business_differences", document_differences(
+                projection(original, field_id, schema),
+                projection(readback, field_id, schema)))
+        return store, index_row
+
+    def index_only_168777_store(self, folder, extra_difference=False):
+        store, _ = self.index_only_168436_store(folder)
+        prepare_pending_continuation(store, isolate_168436_index_failure=True)
+        field_id = "1462401000020819910"
+        index_row = {
+            **self.row,
+            "zoho_id": PENDING_CONTINUATION_168777_MARKER["document_id"],
+            "number": PENDING_CONTINUATION_168777_MARKER["number"],
+            "branch_record_id": PENDING_CONTINUATION_168777_MARKER["branch_record_id"],
+        }
+        original = document(index_row)
+        original["custom_fields"] = [
+            field for field in original["custom_fields"]
+            if str(field.get("customfield_id")) != self.schema["field_id"]]
+        original["custom_fields"][0]["index"] = 1
+        original["custom_field_hash"].pop("cf_customer_branch")
+
+        readback = deepcopy(original)
+        readback["custom_fields"][0]["index"] = 2
+        readback["custom_fields"].insert(0, {
+            "customfield_id": field_id, "index": 1,
+            "api_name": "cf_customer_branch", "data_type": "lookup",
+            "value": index_row["branch_record_id"]})
+        readback["custom_field_hash"]["cf_customer_branch"] = index_row["branch_record_id"]
+        if extra_difference:
+            readback["total"] = 99
+
+        with store.db:
+            store.db.execute("INSERT INTO documents(type,zoho_id,mapping) VALUES(?,?,?)",
+                             (index_row["type"], index_row["zoho_id"],
+                              json.dumps(index_row)))
+        store.update(index_row, "failed", PENDING_CONTINUATION_168777_MARKER["failure"],
+                     original=original)
+        store.halt(PENDING_CONTINUATION_168777_MARKER["halt_reason"])
+        store.record_evidence(index_row, "lookup_before", {"custom_fields": [{
+            "customfield_id": field_id, "api_name": "cf_customer_branch",
+            "data_type": "lookup", "value": ""}]})
+        store.record_evidence(index_row, "request", {
+            "method": "PUT", "path": "/invoices/" + index_row["zoho_id"],
+            "payload": {"custom_fields": [{
+                "customfield_id": field_id,
+                "value": index_row["branch_record_id"]}]}})
+        store.record_evidence(index_row, "write_response", {"code": 0})
+        store.record_evidence(index_row, "readback", readback)
+        schema = {**self.schema, "field_id": field_id}
+        store.record_evidence(index_row, "business_differences", document_differences(
+            projection(original, field_id, schema),
+            projection(readback, field_id, schema)))
+        return store, index_row
+
+    def index_only_168812_store(self, folder, extra_difference=False):
+        store, _ = self.index_only_168777_store(folder)
+        prepare_pending_continuation(store, isolate_168777_index_failure=True)
+        field_id = "1462401000020819910"
+        index_row = {
+            **self.row,
+            "zoho_id": PENDING_CONTINUATION_168812_MARKER["document_id"],
+            "number": PENDING_CONTINUATION_168812_MARKER["number"],
+            "branch_record_id": PENDING_CONTINUATION_168812_MARKER["branch_record_id"],
+        }
+        original = document(index_row)
+        original["custom_fields"] = [
+            field for field in original["custom_fields"]
+            if str(field.get("customfield_id")) != self.schema["field_id"]]
+        original["custom_fields"][0]["index"] = 1
+        original["custom_field_hash"].pop("cf_customer_branch")
+
+        readback = deepcopy(original)
+        readback["custom_fields"][0]["index"] = 2
+        readback["custom_fields"].insert(0, {
+            "customfield_id": field_id, "index": 1,
+            "api_name": "cf_customer_branch", "data_type": "lookup",
+            "value": index_row["branch_record_id"]})
+        readback["custom_field_hash"]["cf_customer_branch"] = index_row["branch_record_id"]
+        if extra_difference:
+            readback["total"] = 99
+
+        with store.db:
+            store.db.execute("INSERT INTO documents(type,zoho_id,mapping) VALUES(?,?,?)",
+                             (index_row["type"], index_row["zoho_id"],
+                              json.dumps(index_row)))
+        store.update(index_row, "failed", PENDING_CONTINUATION_168812_MARKER["failure"],
+                     original=original)
+        store.halt(PENDING_CONTINUATION_168812_MARKER["halt_reason"])
+        store.record_evidence(index_row, "lookup_before", {"custom_fields": [{
+            "customfield_id": field_id, "api_name": "cf_customer_branch",
+            "data_type": "lookup", "value": ""}]})
+        store.record_evidence(index_row, "request", {
+            "method": "PUT", "path": "/invoices/" + index_row["zoho_id"],
+            "payload": {"custom_fields": [{
+                "customfield_id": field_id,
+                "value": index_row["branch_record_id"]}]}})
+        store.record_evidence(index_row, "write_response", {"code": 0})
+        store.record_evidence(index_row, "readback", readback)
+        schema = {**self.schema, "field_id": field_id}
+        store.record_evidence(index_row, "business_differences", document_differences(
+            projection(original, field_id, schema),
+            projection(readback, field_id, schema)))
+        return store, index_row
+
+    def index_only_168905_store(self, folder, extra_difference=False):
+        store, _ = self.index_only_168812_store(folder)
+        prepare_pending_continuation(store, isolate_168812_index_failure=True)
+        field_id = "1462401000020819910"
+        index_row = {
+            **self.row,
+            "zoho_id": PENDING_CONTINUATION_168905_MARKER["document_id"],
+            "number": PENDING_CONTINUATION_168905_MARKER["number"],
+            "branch_record_id": PENDING_CONTINUATION_168905_MARKER["branch_record_id"],
+        }
+        original = document(index_row)
+        original["custom_fields"] = [
+            field for field in original["custom_fields"]
+            if str(field.get("customfield_id")) != self.schema["field_id"]]
+        original["custom_fields"][0]["index"] = 1
+        original["custom_field_hash"].pop("cf_customer_branch")
+
+        readback = deepcopy(original)
+        readback["custom_fields"][0]["index"] = 2
+        readback["custom_fields"].insert(0, {
+            "customfield_id": field_id, "index": 1,
+            "api_name": "cf_customer_branch", "data_type": "lookup",
+            "value": index_row["branch_record_id"]})
+        readback["custom_field_hash"]["cf_customer_branch"] = index_row["branch_record_id"]
+        if extra_difference:
+            readback["total"] = 99
+
+        with store.db:
+            store.db.execute("INSERT INTO documents(type,zoho_id,mapping) VALUES(?,?,?)",
+                             (index_row["type"], index_row["zoho_id"],
+                              json.dumps(index_row)))
+        store.update(index_row, "failed", PENDING_CONTINUATION_168905_MARKER["failure"],
+                     original=original)
+        store.halt(PENDING_CONTINUATION_168905_MARKER["halt_reason"])
+        store.record_evidence(index_row, "lookup_before", {"custom_fields": [{
+            "customfield_id": field_id, "api_name": "cf_customer_branch",
+            "data_type": "lookup", "value": ""}]})
+        store.record_evidence(index_row, "request", {
+            "method": "PUT", "path": "/invoices/" + index_row["zoho_id"],
+            "payload": {"custom_fields": [{
+                "customfield_id": field_id,
+                "value": index_row["branch_record_id"]}]}})
+        store.record_evidence(index_row, "write_response", {"code": 0})
+        store.record_evidence(index_row, "readback", readback)
+        schema = {**self.schema, "field_id": field_id}
+        store.record_evidence(index_row, "business_differences", document_differences(
+            projection(original, field_id, schema),
+            projection(readback, field_id, schema)))
+        return store, index_row
+
+    def test_isolating_interrupted_165534_keeps_it_failed_and_allows_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, interrupted_row = self.interrupted_165534_store(temp)
+            try:
+                prepare_pending_continuation(
+                    store, isolate_interrupted_stock_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (interrupted_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_165534_MARKER["failure"])
+                self.assertEqual(store.get(PENDING_CONTINUATION_165534_KEY),
+                                 PENDING_CONTINUATION_165534_MARKER)
+                self.assertIsNone(store.get("halted"))
+                self.assertFalse(should_process_invoice("failed", True))
+                self.assertTrue(should_process_invoice("pending", True))
+                self.assertEqual(recovery_candidates(store), [])
+                prepare_pending_continuation(store)
+            finally:
+                store.db.close()
+
+    def test_interrupted_165534_isolation_rejects_extra_differences_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, interrupted_row = self.interrupted_165534_store(
+                temp, extra_difference=True)
+            try:
+                with self.assertRaisesRegex(BackfillError, "unexpected business differences"):
+                    prepare_pending_continuation(
+                        store, isolate_interrupted_stock_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (interrupted_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "updating")
+                self.assertEqual(saved["error"], "")
+                self.assertIsNone(store.get(PENDING_CONTINUATION_165534_KEY))
+            finally:
+                store.db.close()
+
+    def test_isolating_165818_index_change_keeps_it_failed_and_allows_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_165818_store(temp)
+            try:
+                prepare_pending_continuation(
+                    store, isolate_165818_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_165818_MARKER["failure"])
+                self.assertEqual(store.get(PENDING_CONTINUATION_165818_KEY),
+                                 PENDING_CONTINUATION_165818_MARKER)
+                self.assertIsNone(store.get("halted"))
+                self.assertFalse(should_process_invoice("failed", True))
+                self.assertTrue(should_process_invoice("pending", True))
+                self.assertEqual(recovery_candidates(store), [])
+                prepare_pending_continuation(store)
+            finally:
+                store.db.close()
+
+    def test_165818_isolation_rejects_any_difference_beyond_custom_field_index(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_165818_store(temp, extra_difference=True)
+            try:
+                with self.assertRaisesRegex(BackfillError, "unexpected business differences"):
+                    prepare_pending_continuation(
+                        store, isolate_165818_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_165818_MARKER["failure"])
+                self.assertIsNone(store.get(PENDING_CONTINUATION_165818_KEY))
+                self.assertEqual(store.get("halted"),
+                                 PENDING_CONTINUATION_165818_MARKER["halt_reason"])
+            finally:
+                store.db.close()
+
+    def test_isolating_167764_authorization_rejection_keeps_it_failed_and_allows_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, failed_row = self.unauthorized_167764_store(temp)
+            try:
+                prepare_pending_continuation(
+                    store, isolate_167764_unauthorized_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (failed_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_167764_MARKER["failure"])
+                self.assertEqual(store.get(PENDING_CONTINUATION_167764_KEY),
+                                 PENDING_CONTINUATION_167764_MARKER)
+                self.assertIsNone(store.get("halted"))
+                self.assertFalse(should_process_invoice("failed", True))
+                self.assertTrue(should_process_invoice("pending", True))
+                self.assertEqual(recovery_candidates(store), [])
+                prepare_pending_continuation(store)
+            finally:
+                store.db.close()
+
+    def test_167764_isolation_rejects_protected_data_change_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, failed_row = self.unauthorized_167764_store(
+                temp, extra_difference=True)
+            try:
+                with self.assertRaisesRegex(BackfillError, "evidence is missing or ambiguous"):
+                    prepare_pending_continuation(
+                        store, isolate_167764_unauthorized_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (failed_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_167764_MARKER["failure"])
+                self.assertIsNone(store.get(PENDING_CONTINUATION_167764_KEY))
+                self.assertEqual(store.get("halted"),
+                                 PENDING_CONTINUATION_167764_MARKER["halt_reason"])
+            finally:
+                store.db.close()
+
+    def test_isolating_168436_index_shifts_keeps_it_failed_and_allows_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168436_store(temp)
+            try:
+                prepare_pending_continuation(
+                    store, isolate_168436_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168436_MARKER["failure"])
+                self.assertEqual(store.get(PENDING_CONTINUATION_168436_KEY),
+                                 PENDING_CONTINUATION_168436_MARKER)
+                self.assertIsNone(store.get("halted"))
+                self.assertFalse(should_process_invoice("failed", True))
+                self.assertTrue(should_process_invoice("pending", True))
+                self.assertEqual(recovery_candidates(store), [])
+                prepare_pending_continuation(store)
+            finally:
+                store.db.close()
+
+    def test_168436_isolation_rejects_non_index_change_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168436_store(
+                temp, extra_difference=True)
+            try:
+                with self.assertRaisesRegex(BackfillError, "unexpected business differences"):
+                    prepare_pending_continuation(
+                        store, isolate_168436_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168436_MARKER["failure"])
+                self.assertIsNone(store.get(PENDING_CONTINUATION_168436_KEY))
+                self.assertEqual(store.get("halted"),
+                                 PENDING_CONTINUATION_168436_MARKER["halt_reason"])
+            finally:
+                store.db.close()
+
+    def test_isolating_168777_index_change_keeps_it_failed_and_allows_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168777_store(temp)
+            try:
+                prepare_pending_continuation(
+                    store, isolate_168777_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168777_MARKER["failure"])
+                self.assertEqual(store.get(PENDING_CONTINUATION_168777_KEY),
+                                 PENDING_CONTINUATION_168777_MARKER)
+                self.assertIsNone(store.get("halted"))
+                self.assertFalse(should_process_invoice("failed", True))
+                self.assertTrue(should_process_invoice("pending", True))
+                self.assertEqual(recovery_candidates(store), [])
+                prepare_pending_continuation(store)
+            finally:
+                store.db.close()
+
+    def test_168777_isolation_rejects_extra_difference_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168777_store(
+                temp, extra_difference=True)
+            try:
+                with self.assertRaisesRegex(BackfillError, "unexpected business differences"):
+                    prepare_pending_continuation(
+                        store, isolate_168777_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168777_MARKER["failure"])
+                self.assertIsNone(store.get(PENDING_CONTINUATION_168777_KEY))
+                self.assertEqual(store.get("halted"),
+                                 PENDING_CONTINUATION_168777_MARKER["halt_reason"])
+            finally:
+                store.db.close()
+
+    def test_isolating_168812_index_change_keeps_it_failed_and_allows_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168812_store(temp)
+            try:
+                prepare_pending_continuation(
+                    store, isolate_168812_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168812_MARKER["failure"])
+                self.assertEqual(store.get(PENDING_CONTINUATION_168812_KEY),
+                                 PENDING_CONTINUATION_168812_MARKER)
+                self.assertIsNone(store.get("halted"))
+                self.assertFalse(should_process_invoice("failed", True))
+                self.assertTrue(should_process_invoice("pending", True))
+                self.assertEqual(recovery_candidates(store), [])
+                prepare_pending_continuation(store)
+            finally:
+                store.db.close()
+
+    def test_168812_isolation_rejects_extra_difference_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168812_store(
+                temp, extra_difference=True)
+            try:
+                with self.assertRaisesRegex(BackfillError, "unexpected business differences"):
+                    prepare_pending_continuation(
+                        store, isolate_168812_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168812_MARKER["failure"])
+                self.assertIsNone(store.get(PENDING_CONTINUATION_168812_KEY))
+                self.assertEqual(store.get("halted"),
+                                 PENDING_CONTINUATION_168812_MARKER["halt_reason"])
+            finally:
+                store.db.close()
+
+    def test_isolating_168905_index_change_keeps_it_failed_and_allows_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168905_store(temp)
+            try:
+                prepare_pending_continuation(
+                    store, isolate_168905_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168905_MARKER["failure"])
+                self.assertEqual(store.get(PENDING_CONTINUATION_168905_KEY),
+                                 PENDING_CONTINUATION_168905_MARKER)
+                self.assertIsNone(store.get("halted"))
+                self.assertFalse(should_process_invoice("failed", True))
+                self.assertTrue(should_process_invoice("pending", True))
+                self.assertEqual(recovery_candidates(store), [])
+            finally:
+                store.db.close()
+
+    def test_168905_isolation_rejects_extra_difference_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, index_row = self.index_only_168905_store(
+                temp, extra_difference=True)
+            try:
+                with self.assertRaisesRegex(BackfillError, "unexpected business differences"):
+                    prepare_pending_continuation(
+                        store, isolate_168905_index_failure=True)
+                saved = store.db.execute(
+                    "SELECT status,error FROM documents WHERE zoho_id=?",
+                    (index_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(saved["error"], PENDING_CONTINUATION_168905_MARKER["failure"])
+                self.assertIsNone(store.get(PENDING_CONTINUATION_168905_KEY))
+                self.assertEqual(store.get("halted"),
+                                 PENDING_CONTINUATION_168905_MARKER["halt_reason"])
+            finally:
+                store.db.close()
 
     def test_pending_continuation_preserves_the_known_failure_and_halt(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -455,6 +1119,14 @@ class InvoiceRunnerTests(unittest.TestCase):
         self.assertFalse(should_verify_investigated_invoice(False, True, True))
         self.assertTrue(should_verify_investigated_invoice(False, True, False))
         self.assertTrue(should_verify_investigated_invoice(False, False, True))
+        self.assertFalse(should_verify_investigated_invoice(
+            False, False, True, reconcile_read_failure=True))
+        self.assertTrue(should_verify_investigated_invoice(
+            False, False, False, reconcile_read_failure=True))
+        self.assertFalse(should_verify_investigated_invoice(
+            False, False, True, reconcile_manual_branch=True))
+        self.assertTrue(should_verify_investigated_invoice(
+            False, False, False, reconcile_manual_branch=True))
 
     def test_stock_only_reconciliation_verifies_branch_without_another_write(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -576,6 +1248,37 @@ class InvoiceRunnerTests(unittest.TestCase):
                 self.assertEqual(len(client.payloads), 1)
                 self.assertEqual(store.db.execute("SELECT status FROM documents").fetchone()[0], "updated_verified")
                 self.assertEqual(len(list(folder.glob('before_recovery_*.sqlite3'))), 1)
+            finally:
+                store.db.close()
+
+    def test_uncertain_write_recovery_verifies_with_read_without_retrying(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            store, client = self.failed_uncertain_read_store(
+                folder, self.row["branch_record_id"])
+            try:
+                reconcile_read_failure(client, store, self.schema, folder)
+                self.assertIsNone(store.get("halted"))
+                self.assertEqual(len(client.payloads), 0)
+                self.assertEqual(
+                    store.db.execute("SELECT status FROM documents").fetchone()[0],
+                    "updated_verified")
+                self.assertEqual(
+                    len(list(folder.glob("before_recovery_*.sqlite3"))), 1)
+            finally:
+                store.db.close()
+
+    def test_uncertain_write_recovery_keeps_halt_when_branch_is_not_verified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store, client = self.failed_uncertain_read_store(folder=temp, current_branch="")
+            try:
+                with self.assertRaisesRegex(BackfillError, "Recovery read does not verify"):
+                    reconcile_read_failure(client, store, self.schema, Path(temp))
+                self.assertEqual(store.get("halted"), "Read failed after bounded retries")
+                self.assertEqual(len(client.payloads), 0)
+                self.assertEqual(
+                    store.db.execute("SELECT status FROM documents").fetchone()[0],
+                    "failed")
             finally:
                 store.db.close()
 
@@ -907,6 +1610,47 @@ class InvoiceRunnerTests(unittest.TestCase):
                 self.assertIsNone(store.get("halted"))
                 self.assertEqual(store.db.execute(
                     "SELECT status FROM documents").fetchone()[0], "updated_verified")
+            finally:
+                store.db.close()
+
+    def test_manual_branch_reconciliation_accepts_isolated_invoice_with_other_marked_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            store, _ = self.index_only_168905_store(folder)
+            prepare_pending_continuation(store, isolate_168905_index_failure=True)
+            recovery_row = {**self.row, "zoho_id": "1462401000002738299",
+                            "number": "157368", "branch_record_id": "1462401000020819564"}
+            client = OmittedLookupClient(recovery_row, recovery_row["branch_record_id"])
+            try:
+                with patch("builtins.print"):
+                    reconcile_manual_branch_update(client, store, self.schema, folder)
+                self.assertEqual(client.payloads, [])
+                saved = store.db.execute(
+                    "SELECT status FROM documents WHERE zoho_id=?",
+                    (recovery_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "updated_verified")
+                self.assertIsNone(store.get("halted"))
+            finally:
+                store.db.close()
+
+    def test_manual_branch_reconciliation_preserves_isolated_failures_when_branch_blank(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            store, _ = self.index_only_168905_store(folder)
+            prepare_pending_continuation(store, isolate_168905_index_failure=True)
+            recovery_row = {**self.row, "zoho_id": "1462401000002738299",
+                            "number": "157368", "branch_record_id": "1462401000020819564"}
+            client = OmittedLookupClient(recovery_row)
+            try:
+                with self.assertRaisesRegex(BackfillError, "Expected branch is not saved in Zoho"):
+                    reconcile_manual_branch_update(client, store, self.schema, folder)
+                self.assertEqual(client.payloads, [])
+                saved = store.db.execute(
+                    "SELECT status FROM documents WHERE zoho_id=?",
+                    (recovery_row["zoho_id"],)).fetchone()
+                self.assertEqual(saved["status"], "failed")
+                self.assertEqual(store.db.execute(
+                    "SELECT COUNT(*) FROM documents WHERE status='failed'").fetchone()[0], 10)
             finally:
                 store.db.close()
 

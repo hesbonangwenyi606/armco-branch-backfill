@@ -38,6 +38,61 @@ PENDING_CONTINUATION_161528_MARKER = {
     "halt_reason": "Customer Branch update was not verified",
     "failure": "Customer Branch update was not verified",
 }
+PENDING_CONTINUATION_165534_KEY = "pending_continuation:165534"
+PENDING_CONTINUATION_165534_MARKER = {
+    "number": "165534",
+    "document_id": "1462401000004191906",
+    "branch_record_id": "1462401000020819279",
+    "failure": "Invoice 165534 isolated; stock differences remain unverified",
+}
+PENDING_CONTINUATION_165818_KEY = "pending_continuation:165818"
+PENDING_CONTINUATION_165818_MARKER = {
+    "number": "165818",
+    "document_id": "1462401000004205124",
+    "branch_record_id": "1462401000020818724",
+    "halt_reason": "Other business details changed; stopped for investigation",
+    "failure": "Other business details changed; stopped for investigation",
+}
+PENDING_CONTINUATION_167764_KEY = "pending_continuation:167764"
+PENDING_CONTINUATION_167764_MARKER = {
+    "number": "167764",
+    "document_id": "1462401000004345968",
+    "branch_record_id": "1462401000020819279",
+    "halt_reason": "Customer Branch update was not verified",
+    "failure": "Customer Branch update was not verified",
+}
+PENDING_CONTINUATION_168436_KEY = "pending_continuation:168436"
+PENDING_CONTINUATION_168436_MARKER = {
+    "number": "168436",
+    "document_id": "1462401000016155078",
+    "branch_record_id": "1462401000020818784",
+    "halt_reason": "Other business details changed; stopped for investigation",
+    "failure": "Other business details changed; stopped for investigation",
+}
+PENDING_CONTINUATION_168777_KEY = "pending_continuation:168777"
+PENDING_CONTINUATION_168777_MARKER = {
+    "number": "168777",
+    "document_id": "1462401000016175135",
+    "branch_record_id": "1462401000020819039",
+    "halt_reason": "Other business details changed; stopped for investigation",
+    "failure": "Other business details changed; stopped for investigation",
+}
+PENDING_CONTINUATION_168812_KEY = "pending_continuation:168812"
+PENDING_CONTINUATION_168812_MARKER = {
+    "number": "168812",
+    "document_id": "1462401000016177451",
+    "branch_record_id": "1462401000020818924",
+    "halt_reason": "Other business details changed; stopped for investigation",
+    "failure": "Other business details changed; stopped for investigation",
+}
+PENDING_CONTINUATION_168905_KEY = "pending_continuation:168905"
+PENDING_CONTINUATION_168905_MARKER = {
+    "number": "168905",
+    "document_id": "1462401000016182809",
+    "branch_record_id": "1462401000020818924",
+    "halt_reason": "Other business details changed; stopped for investigation",
+    "failure": "Other business details changed; stopped for investigation",
+}
 STOCK_ONLY_RECONCILIATION = {
     "number": "160059",
     "document_id": "1462401000002906040",
@@ -51,6 +106,20 @@ STOCK_ONLY_DIFFERENCE_PATHS = {
     "/line_items/4/available_for_sale_stock",
     "/line_items/4/available_stock",
     "/line_items/4/stock_on_hand",
+}
+INTERRUPTED_165534_STOCK_DIFFERENCE_PATHS = {
+    "/line_items/0/actual_available_for_sale_stock",
+    "/line_items/0/actual_available_stock",
+    "/line_items/0/available_for_sale_stock",
+    "/line_items/0/available_stock",
+    "/line_items/0/stock_on_hand",
+    "/line_items/1/actual_available_for_sale_stock",
+    "/line_items/1/actual_available_stock",
+    "/line_items/1/actual_committed_stock",
+    "/line_items/1/available_for_sale_stock",
+    "/line_items/1/available_stock",
+    "/line_items/1/committed_stock",
+    "/line_items/1/stock_on_hand",
 }
 
 
@@ -462,12 +531,23 @@ def retry_dedicated_customfield_endpoint(client, store, schema, folder):
 
 def reconcile_manual_branch_update(client, store, schema, folder):
     halt = "Customer Branch field absent or duplicated; run discovery"
-    if store.get("halted") != halt:
-        raise BackfillError("Recovery is restricted to the saved omitted-field halt")
-    failed = list(store.db.execute("SELECT * FROM documents WHERE status IN ('failed','updating')"))
-    if len(failed) != 1 or failed[0]["status"] != "failed" or not failed[0]["original"]:
-        raise BackfillError("Expected exactly one saved failed invoice with an original document")
-    saved = failed[0]
+    continuation_marker = store.get(PENDING_CONTINUATION_KEY)
+    if continuation_marker is not None:
+        if continuation_marker != PENDING_CONTINUATION_MARKER or store.get("halted") is not None:
+            raise BackfillError("Manual verification requires the saved 157368 marker and no active halt")
+        prepare_pending_continuation(store)
+        saved = store.db.execute(
+            "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+            (PENDING_CONTINUATION_MARKER["document_id"],)).fetchone()
+        if saved is None or saved["status"] != "failed" or not saved["original"]:
+            raise BackfillError("Saved invoice 157368 failure is missing; halt retained")
+    else:
+        if store.get("halted") != halt:
+            raise BackfillError("Recovery is restricted to the saved omitted-field halt")
+        failed = list(store.db.execute("SELECT * FROM documents WHERE status IN ('failed','updating')"))
+        if len(failed) != 1 or failed[0]["status"] != "failed" or not failed[0]["original"]:
+            raise BackfillError("Expected exactly one saved failed invoice with an original document")
+        saved = failed[0]
     row, original = json.loads(saved["mapping"]), json.loads(saved["original"])
     if (row["type"] != "invoice" or row["number"] != "157368" or
             row["zoho_id"] != "1462401000002738299" or
@@ -682,10 +762,12 @@ def reconcile_429(client, store, schema, folder):
 
 
 def reconcile_read_failure(client, store, schema, folder):
-    if store.get("halted") != "Read failed after bounded retries":
+    halt = "Read failed after bounded retries"
+    if store.get("halted") != halt:
         raise BackfillError("Recovery is restricted to the investigated read-retry halt")
     failed = recovery_candidates(store)
-    if len(failed) != 1 or not failed[0]["original"]:
+    if (len(failed) != 1 or failed[0]["status"] != "failed" or
+            failed[0]["error"] != halt or not failed[0]["original"]):
         raise BackfillError("Expected exactly one saved attempted invoice")
     saved = failed[0]
     row, before = json.loads(saved["mapping"]), json.loads(saved["original"])
@@ -693,11 +775,30 @@ def reconcile_read_failure(client, store, schema, folder):
                                     ("evidence:invoice:" + row["zoho_id"] + ":%",)))
     responses = [json.loads(item["value"]) for item in evidence if item["key"].endswith(":write_response")]
     requests = [json.loads(item["value"]) for item in evidence if item["key"].endswith(":request")]
+    write_errors = [json.loads(item["value"]) for item in evidence
+                    if item["key"].endswith(":write_error")]
     expected = {"method": "PUT", "path": "/invoices/" + row["zoho_id"], "payload": {
         "custom_fields": [{"customfield_id": schema["field_id"], "value": row["branch_record_id"]}]}}
-    if (len(responses) != 1 or responses[0].get("code") != 0 or requests != [expected] or
-            any(item["key"].endswith(":write_error") for item in evidence)):
-        raise BackfillError("Saved successful write evidence is missing or ambiguous")
+    if requests != [expected]:
+        raise BackfillError("Saved request evidence is missing or ambiguous")
+    if responses:
+        if (len(responses) != 1 or responses[0].get("code") != 0 or write_errors):
+            raise BackfillError("Saved successful write evidence is missing or ambiguous")
+    else:
+        evidence_kinds = {item["key"].rsplit(":", 1)[-1] for item in evidence}
+        expected_error = {
+            "error": "Uncertain write: network failure; read before retry",
+            "http_status": None,
+            "response": None,
+        }
+        lookups = [json.loads(item["value"]) for item in evidence
+                   if item["key"].endswith(":lookup_before")]
+        original_blank = (branch_is_omitted(before, schema["field_id"], schema) or
+                          branch_value(before, schema["field_id"]) == "")
+        if (evidence_kinds != {"lookup_before", "request", "write_error"} or
+                write_errors != [expected_error] or len(lookups) != 1 or
+                branch_value(lookups[0], schema["field_id"]) != "" or not original_blank):
+            raise BackfillError("Saved uncertain-write evidence is missing or ambiguous")
     after = client.read(row)
     store.record_evidence(row, "recovery_readback", after)
     verified_branch = verify_readback(client, row, schema, before, after, store,
@@ -855,14 +956,396 @@ def recovery_candidates(store):
             isolated_ids.add(PENDING_CONTINUATION_160059_MARKER["document_id"])
         if store.get(PENDING_CONTINUATION_161528_KEY) == PENDING_CONTINUATION_161528_MARKER:
             isolated_ids.add(PENDING_CONTINUATION_161528_MARKER["document_id"])
+        if store.get(PENDING_CONTINUATION_165534_KEY) == PENDING_CONTINUATION_165534_MARKER:
+            isolated_ids.add(PENDING_CONTINUATION_165534_MARKER["document_id"])
+        if store.get(PENDING_CONTINUATION_165818_KEY) == PENDING_CONTINUATION_165818_MARKER:
+            isolated_ids.add(PENDING_CONTINUATION_165818_MARKER["document_id"])
+        if store.get(PENDING_CONTINUATION_167764_KEY) == PENDING_CONTINUATION_167764_MARKER:
+            isolated_ids.add(PENDING_CONTINUATION_167764_MARKER["document_id"])
+        if store.get(PENDING_CONTINUATION_168436_KEY) == PENDING_CONTINUATION_168436_MARKER:
+            isolated_ids.add(PENDING_CONTINUATION_168436_MARKER["document_id"])
+        if store.get(PENDING_CONTINUATION_168777_KEY) == PENDING_CONTINUATION_168777_MARKER:
+            isolated_ids.add(PENDING_CONTINUATION_168777_MARKER["document_id"])
+        if store.get(PENDING_CONTINUATION_168812_KEY) == PENDING_CONTINUATION_168812_MARKER:
+            isolated_ids.add(PENDING_CONTINUATION_168812_MARKER["document_id"])
+        if store.get(PENDING_CONTINUATION_168905_KEY) == PENDING_CONTINUATION_168905_MARKER:
+            isolated_ids.add(PENDING_CONTINUATION_168905_MARKER["document_id"])
         rows = [row for row in rows
                 if not (row["type"] == "invoice" and
                         row["zoho_id"] in isolated_ids)]
     return rows
 
 
+def validate_interrupted_165534_isolation(store, saved, already_isolated):
+    marker = PENDING_CONTINUATION_165534_MARKER
+    expected_status = "failed" if already_isolated else "updating"
+    expected_error = marker["failure"] if already_isolated else ""
+    mapping = json.loads(saved["mapping"])
+    field_id = "1462401000020819910"
+    schema = {"field_id": field_id, "api_name": "cf_customer_branch"}
+    if (saved["type"] != "invoice" or saved["zoho_id"] != marker["document_id"] or
+            saved["status"] != expected_status or saved["error"] != expected_error or
+            not saved["original"] or mapping.get("number") != marker["number"] or
+            mapping.get("branch_record_id") != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 165534 interruption evidence changed; halt retained")
+
+    original = json.loads(saved["original"])
+    original_branch_blank = (branch_is_omitted(original, field_id, schema) or
+                             branch_value(original, field_id) == "")
+    if not original_branch_blank:
+        raise BackfillError("Saved invoice 165534 original branch is not blank; halt retained")
+
+    prefix = "evidence:invoice:" + marker["document_id"] + ":"
+    evidence = {}
+    for item in store.db.execute("SELECT key,value FROM meta WHERE key LIKE ?",
+                                 (prefix + "%",)):
+        evidence.setdefault(item["key"].rsplit(":", 1)[-1], []).append(
+            json.loads(item["value"]))
+    expected_kinds = {"lookup_before", "request", "interruption_readback",
+                      "business_differences"}
+    expected_request = {
+        "method": "PUT", "path": "/invoices/" + marker["document_id"],
+        "payload": {"custom_fields": [{
+            "customfield_id": field_id, "value": marker["branch_record_id"]}]}}
+    readbacks = evidence.get("interruption_readback", [])
+    differences = evidence.get("business_differences", [])
+    if (set(evidence) != expected_kinds or
+            evidence.get("request") != [expected_request] or
+            len(evidence.get("lookup_before", [])) != 1 or not readbacks or
+            len(readbacks) != len(differences) or
+            branch_value(evidence["lookup_before"][0], field_id) != "" or
+            any(branch_value(readback, field_id) != marker["branch_record_id"]
+                for readback in readbacks)):
+        raise BackfillError("Saved invoice 165534 request/readback evidence is ambiguous; halt retained")
+    for group in differences:
+        if not isinstance(group, list):
+            raise BackfillError("Invoice 165534 has invalid business-difference evidence; halt retained")
+        paths = {item.get("path") for item in group if isinstance(item, dict)}
+        if (len(group) != len(paths) or paths != INTERRUPTED_165534_STOCK_DIFFERENCE_PATHS):
+            raise BackfillError("Invoice 165534 has unexpected business differences; halt retained")
+
+
+def validate_165818_index_isolation(store, saved):
+    marker = PENDING_CONTINUATION_165818_MARKER
+    field_id = "1462401000020819910"
+    schema = {"field_id": field_id, "api_name": "cf_customer_branch"}
+    mapping = json.loads(saved["mapping"])
+    if (saved["type"] != "invoice" or saved["zoho_id"] != marker["document_id"] or
+            saved["status"] != "failed" or saved["error"] != marker["failure"] or
+            not saved["original"] or mapping.get("number") != marker["number"] or
+            mapping.get("branch_record_id") != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 165818 failure evidence changed; halt retained")
+
+    original = json.loads(saved["original"])
+    if not (branch_is_omitted(original, field_id, schema) or
+            branch_value(original, field_id) == ""):
+        raise BackfillError("Saved invoice 165818 original branch is not blank; halt retained")
+
+    prefix = "evidence:invoice:" + marker["document_id"] + ":"
+    evidence = {}
+    for item in store.db.execute("SELECT key,value FROM meta WHERE key LIKE ?",
+                                 (prefix + "%",)):
+        evidence.setdefault(item["key"].rsplit(":", 1)[-1], []).append(
+            json.loads(item["value"]))
+    expected_kinds = {"lookup_before", "request", "write_response", "readback",
+                      "business_differences"}
+    expected_request = {
+        "method": "PUT", "path": "/invoices/" + marker["document_id"],
+        "payload": {"custom_fields": [{
+            "customfield_id": field_id, "value": marker["branch_record_id"]}]}}
+    lookups = evidence.get("lookup_before", [])
+    responses = evidence.get("write_response", [])
+    readbacks = evidence.get("readback", [])
+    differences = evidence.get("business_differences", [])
+    if (set(evidence) != expected_kinds or evidence.get("request") != [expected_request] or
+            len(lookups) != 1 or len(responses) != 1 or
+            responses[0].get("code") != 0 or len(readbacks) != 1 or
+            len(differences) != 1 or
+            branch_value(lookups[0], field_id) != "" or
+            branch_value(readbacks[0], field_id) != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 165818 write/readback evidence is ambiguous; halt retained")
+
+    actual_differences = document_differences(
+        projection(original, field_id, schema),
+        projection(readbacks[0], field_id, schema))
+    if (len(actual_differences) != 1 or
+            actual_differences[0].get("path") != "/custom_fields/0/index" or
+            differences != [actual_differences]):
+        raise BackfillError("Invoice 165818 has unexpected business differences; halt retained")
+
+
+def validate_167764_unauthorized_isolation(store, saved):
+    marker = PENDING_CONTINUATION_167764_MARKER
+    field_id = "1462401000020819910"
+    schema = {"field_id": field_id, "api_name": "cf_customer_branch"}
+
+    def branch_is_empty(document):
+        return (branch_is_omitted(document, field_id, schema) or
+                branch_value(document, field_id) == "")
+
+    mapping = json.loads(saved["mapping"])
+    if (saved["type"] != "invoice" or saved["zoho_id"] != marker["document_id"] or
+            saved["status"] != "failed" or saved["error"] != marker["failure"] or
+            not saved["original"] or mapping.get("number") != marker["number"] or
+            mapping.get("branch_record_id") != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 167764 failure evidence changed; halt retained")
+
+    original = json.loads(saved["original"])
+    if not branch_is_empty(original):
+        raise BackfillError("Saved invoice 167764 original branch is not blank; halt retained")
+
+    prefix = "evidence:invoice:" + marker["document_id"] + ":"
+    evidence = {}
+    for item in store.db.execute("SELECT key,value FROM meta WHERE key LIKE ?",
+                                 (prefix + "%",)):
+        evidence.setdefault(item["key"].rsplit(":", 1)[-1], []).append(
+            json.loads(item["value"]))
+    expected_kinds = {"lookup_before", "request", "write_error", "readback",
+                      "verification_lookup"}
+    expected_request = {
+        "method": "PUT", "path": "/invoices/" + marker["document_id"],
+        "payload": {"custom_fields": [{
+            "customfield_id": field_id, "value": marker["branch_record_id"]}]}}
+    expected_error = {
+        "error": "API rejected request (HTTP 401)", "http_status": 401,
+        "response": {"code": 57,
+                     "message": "You are not authorized to perform this operation"}}
+    lookups = evidence.get("lookup_before", [])
+    readbacks = evidence.get("readback", [])
+    verification_lookups = evidence.get("verification_lookup", [])
+    if (set(evidence) != expected_kinds or evidence.get("request") != [expected_request] or
+            evidence.get("write_error") != [expected_error] or
+            len(lookups) != 1 or len(readbacks) != 1 or
+            len(verification_lookups) != 1 or
+            branch_value(lookups[0], field_id) != "" or
+            not branch_is_empty(readbacks[0]) or
+            branch_value(verification_lookups[0], field_id) != "" or
+            document_differences(
+                projection(original, field_id, schema),
+                projection(readbacks[0], field_id, schema))):
+        raise BackfillError("Saved invoice 167764 authorization evidence is missing or ambiguous; halt retained")
+
+
+def validate_168436_index_isolation(store, saved):
+    marker = PENDING_CONTINUATION_168436_MARKER
+    field_id = "1462401000020819910"
+    schema = {"field_id": field_id, "api_name": "cf_customer_branch"}
+    mapping = json.loads(saved["mapping"])
+    if (saved["type"] != "invoice" or saved["zoho_id"] != marker["document_id"] or
+            saved["status"] != "failed" or saved["error"] != marker["failure"] or
+            not saved["original"] or mapping.get("number") != marker["number"] or
+            mapping.get("branch_record_id") != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168436 failure evidence changed; halt retained")
+
+    original = json.loads(saved["original"])
+    if not (branch_is_omitted(original, field_id, schema) or
+            branch_value(original, field_id) == ""):
+        raise BackfillError("Saved invoice 168436 original branch is not blank; halt retained")
+
+    prefix = "evidence:invoice:" + marker["document_id"] + ":"
+    evidence = {}
+    for item in store.db.execute("SELECT key,value FROM meta WHERE key LIKE ?",
+                                 (prefix + "%",)):
+        evidence.setdefault(item["key"].rsplit(":", 1)[-1], []).append(
+            json.loads(item["value"]))
+    expected_kinds = {"lookup_before", "request", "write_response", "readback",
+                      "business_differences"}
+    expected_request = {
+        "method": "PUT", "path": "/invoices/" + marker["document_id"],
+        "payload": {"custom_fields": [{
+            "customfield_id": field_id, "value": marker["branch_record_id"]}]}}
+    lookups = evidence.get("lookup_before", [])
+    responses = evidence.get("write_response", [])
+    readbacks = evidence.get("readback", [])
+    differences = evidence.get("business_differences", [])
+    if (set(evidence) != expected_kinds or evidence.get("request") != [expected_request] or
+            len(lookups) != 1 or len(responses) != 1 or
+            responses[0].get("code") != 0 or len(readbacks) != 1 or
+            len(differences) != 1 or
+            branch_value(lookups[0], field_id) != "" or
+            branch_value(readbacks[0], field_id) != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168436 write/readback evidence is ambiguous; halt retained")
+
+    actual_differences = document_differences(
+        projection(original, field_id, schema),
+        projection(readbacks[0], field_id, schema))
+    expected_indices = {
+        "/custom_fields/{}/index".format(index): (index + 1, index + 2)
+        for index in range(6)
+    }
+    actual_indices = {
+        difference.get("path"): (difference.get("before"), difference.get("after"))
+        for difference in actual_differences
+    }
+    if (actual_indices != expected_indices or differences != [actual_differences]):
+        raise BackfillError("Invoice 168436 has unexpected business differences; halt retained")
+
+
+def validate_168777_index_isolation(store, saved):
+    marker = PENDING_CONTINUATION_168777_MARKER
+    field_id = "1462401000020819910"
+    schema = {"field_id": field_id, "api_name": "cf_customer_branch"}
+    mapping = json.loads(saved["mapping"])
+    if (saved["type"] != "invoice" or saved["zoho_id"] != marker["document_id"] or
+            saved["status"] != "failed" or saved["error"] != marker["failure"] or
+            not saved["original"] or mapping.get("number") != marker["number"] or
+            mapping.get("branch_record_id") != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168777 failure evidence changed; halt retained")
+
+    original = json.loads(saved["original"])
+    if not (branch_is_omitted(original, field_id, schema) or
+            branch_value(original, field_id) == ""):
+        raise BackfillError("Saved invoice 168777 original branch is not blank; halt retained")
+
+    prefix = "evidence:invoice:" + marker["document_id"] + ":"
+    evidence = {}
+    for item in store.db.execute("SELECT key,value FROM meta WHERE key LIKE ?",
+                                 (prefix + "%",)):
+        evidence.setdefault(item["key"].rsplit(":", 1)[-1], []).append(
+            json.loads(item["value"]))
+    expected_kinds = {"lookup_before", "request", "write_response", "readback",
+                      "business_differences"}
+    expected_request = {
+        "method": "PUT", "path": "/invoices/" + marker["document_id"],
+        "payload": {"custom_fields": [{
+            "customfield_id": field_id, "value": marker["branch_record_id"]}]}}
+    lookups = evidence.get("lookup_before", [])
+    responses = evidence.get("write_response", [])
+    readbacks = evidence.get("readback", [])
+    differences = evidence.get("business_differences", [])
+    if (set(evidence) != expected_kinds or evidence.get("request") != [expected_request] or
+            len(lookups) != 1 or len(responses) != 1 or
+            responses[0].get("code") != 0 or len(readbacks) != 1 or
+            len(differences) != 1 or
+            branch_value(lookups[0], field_id) != "" or
+            branch_value(readbacks[0], field_id) != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168777 write/readback evidence is ambiguous; halt retained")
+
+    actual_differences = document_differences(
+        projection(original, field_id, schema),
+        projection(readbacks[0], field_id, schema))
+    expected_difference = {
+        "path": "/custom_fields/0/index", "before_present": True,
+        "after_present": True, "before": 1, "after": 2,
+    }
+    if (actual_differences != [expected_difference] or
+            differences != [actual_differences]):
+        raise BackfillError("Invoice 168777 has unexpected business differences; halt retained")
+
+
+def validate_168812_index_isolation(store, saved):
+    marker = PENDING_CONTINUATION_168812_MARKER
+    field_id = "1462401000020819910"
+    schema = {"field_id": field_id, "api_name": "cf_customer_branch"}
+    mapping = json.loads(saved["mapping"])
+    if (saved["type"] != "invoice" or saved["zoho_id"] != marker["document_id"] or
+            saved["status"] != "failed" or saved["error"] != marker["failure"] or
+            not saved["original"] or mapping.get("number") != marker["number"] or
+            mapping.get("branch_record_id") != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168812 failure evidence changed; halt retained")
+
+    original = json.loads(saved["original"])
+    if not (branch_is_omitted(original, field_id, schema) or
+            branch_value(original, field_id) == ""):
+        raise BackfillError("Saved invoice 168812 original branch is not blank; halt retained")
+
+    prefix = "evidence:invoice:" + marker["document_id"] + ":"
+    evidence = {}
+    for item in store.db.execute("SELECT key,value FROM meta WHERE key LIKE ?",
+                                 (prefix + "%",)):
+        evidence.setdefault(item["key"].rsplit(":", 1)[-1], []).append(
+            json.loads(item["value"]))
+    expected_kinds = {"lookup_before", "request", "write_response", "readback",
+                      "business_differences"}
+    expected_request = {
+        "method": "PUT", "path": "/invoices/" + marker["document_id"],
+        "payload": {"custom_fields": [{
+            "customfield_id": field_id, "value": marker["branch_record_id"]}]}}
+    lookups = evidence.get("lookup_before", [])
+    responses = evidence.get("write_response", [])
+    readbacks = evidence.get("readback", [])
+    differences = evidence.get("business_differences", [])
+    if (set(evidence) != expected_kinds or evidence.get("request") != [expected_request] or
+            len(lookups) != 1 or len(responses) != 1 or
+            responses[0].get("code") != 0 or len(readbacks) != 1 or
+            len(differences) != 1 or
+            branch_value(lookups[0], field_id) != "" or
+            branch_value(readbacks[0], field_id) != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168812 write/readback evidence is ambiguous; halt retained")
+
+    actual_differences = document_differences(
+        projection(original, field_id, schema),
+        projection(readbacks[0], field_id, schema))
+    expected_difference = {
+        "path": "/custom_fields/0/index", "before_present": True,
+        "after_present": True, "before": 1, "after": 2,
+    }
+    if (actual_differences != [expected_difference] or
+            differences != [actual_differences]):
+        raise BackfillError("Invoice 168812 has unexpected business differences; halt retained")
+
+
+def validate_168905_index_isolation(store, saved):
+    marker = PENDING_CONTINUATION_168905_MARKER
+    field_id = "1462401000020819910"
+    schema = {"field_id": field_id, "api_name": "cf_customer_branch"}
+    mapping = json.loads(saved["mapping"])
+    if (saved["type"] != "invoice" or saved["zoho_id"] != marker["document_id"] or
+            saved["status"] != "failed" or saved["error"] != marker["failure"] or
+            not saved["original"] or mapping.get("number") != marker["number"] or
+            mapping.get("branch_record_id") != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168905 failure evidence changed; halt retained")
+
+    original = json.loads(saved["original"])
+    if not (branch_is_omitted(original, field_id, schema) or
+            branch_value(original, field_id) == ""):
+        raise BackfillError("Saved invoice 168905 original branch is not blank; halt retained")
+
+    prefix = "evidence:invoice:" + marker["document_id"] + ":"
+    evidence = {}
+    for item in store.db.execute("SELECT key,value FROM meta WHERE key LIKE ?",
+                                 (prefix + "%",)):
+        evidence.setdefault(item["key"].rsplit(":", 1)[-1], []).append(
+            json.loads(item["value"]))
+    expected_kinds = {"lookup_before", "request", "write_response", "readback",
+                      "business_differences"}
+    expected_request = {
+        "method": "PUT", "path": "/invoices/" + marker["document_id"],
+        "payload": {"custom_fields": [{
+            "customfield_id": field_id, "value": marker["branch_record_id"]}]}}
+    lookups = evidence.get("lookup_before", [])
+    responses = evidence.get("write_response", [])
+    readbacks = evidence.get("readback", [])
+    differences = evidence.get("business_differences", [])
+    if (set(evidence) != expected_kinds or evidence.get("request") != [expected_request] or
+            len(lookups) != 1 or len(responses) != 1 or
+            responses[0].get("code") != 0 or len(readbacks) != 1 or
+            len(differences) != 1 or
+            branch_value(lookups[0], field_id) != "" or
+            branch_value(readbacks[0], field_id) != marker["branch_record_id"]):
+        raise BackfillError("Saved invoice 168905 write/readback evidence is ambiguous; halt retained")
+
+    actual_differences = document_differences(
+        projection(original, field_id, schema),
+        projection(readbacks[0], field_id, schema))
+    expected_difference = {
+        "path": "/custom_fields/0/index", "before_present": True,
+        "after_present": True, "before": 1, "after": 2,
+    }
+    if (actual_differences != [expected_difference] or
+            differences != [actual_differences]):
+        raise BackfillError("Invoice 168905 has unexpected business differences; halt retained")
+
+
 def prepare_pending_continuation(store, isolate_stock_failure=False,
-                                 isolate_unauthorized_failure=False):
+                                 isolate_unauthorized_failure=False,
+                                 isolate_interrupted_stock_failure=False,
+                                 isolate_165818_index_failure=False,
+                                 isolate_167764_unauthorized_failure=False,
+                                 isolate_168436_index_failure=False,
+                                 isolate_168777_index_failure=False,
+                                 isolate_168812_index_failure=False,
+                                 isolate_168905_index_failure=False):
     halt = PENDING_CONTINUATION_MARKER["halt_reason"]
     row_id = PENDING_CONTINUATION_MARKER["document_id"]
     saved_marker = store.get(PENDING_CONTINUATION_KEY)
@@ -875,6 +1358,33 @@ def prepare_pending_continuation(store, isolate_stock_failure=False,
     if (unauthorized_marker is not None and
             unauthorized_marker != PENDING_CONTINUATION_161528_MARKER):
         raise BackfillError("Saved invoice 161528 isolation evidence changed; halt retained")
+    interrupted_marker = store.get(PENDING_CONTINUATION_165534_KEY)
+    if (interrupted_marker is not None and
+            interrupted_marker != PENDING_CONTINUATION_165534_MARKER):
+        raise BackfillError("Saved invoice 165534 isolation evidence changed; halt retained")
+    index_marker = store.get(PENDING_CONTINUATION_165818_KEY)
+    if index_marker is not None and index_marker != PENDING_CONTINUATION_165818_MARKER:
+        raise BackfillError("Saved invoice 165818 isolation evidence changed; halt retained")
+    unauthorized_167764_marker = store.get(PENDING_CONTINUATION_167764_KEY)
+    if (unauthorized_167764_marker is not None and
+            unauthorized_167764_marker != PENDING_CONTINUATION_167764_MARKER):
+        raise BackfillError("Saved invoice 167764 isolation evidence changed; halt retained")
+    index_168436_marker = store.get(PENDING_CONTINUATION_168436_KEY)
+    if (index_168436_marker is not None and
+            index_168436_marker != PENDING_CONTINUATION_168436_MARKER):
+        raise BackfillError("Saved invoice 168436 isolation evidence changed; halt retained")
+    index_168777_marker = store.get(PENDING_CONTINUATION_168777_KEY)
+    if (index_168777_marker is not None and
+            index_168777_marker != PENDING_CONTINUATION_168777_MARKER):
+        raise BackfillError("Saved invoice 168777 isolation evidence changed; halt retained")
+    index_168812_marker = store.get(PENDING_CONTINUATION_168812_KEY)
+    if (index_168812_marker is not None and
+            index_168812_marker != PENDING_CONTINUATION_168812_MARKER):
+        raise BackfillError("Saved invoice 168812 isolation evidence changed; halt retained")
+    index_168905_marker = store.get(PENDING_CONTINUATION_168905_KEY)
+    if (index_168905_marker is not None and
+            index_168905_marker != PENDING_CONTINUATION_168905_MARKER):
+        raise BackfillError("Saved invoice 168905 isolation evidence changed; halt retained")
     active_halt = store.get("halted")
     if isolate_unauthorized_failure:
         if (saved_marker != PENDING_CONTINUATION_MARKER or
@@ -889,6 +1399,80 @@ def prepare_pending_continuation(store, isolate_stock_failure=False,
                  active_halt != STOCK_ONLY_RECONCILIATION["halt_reason"]) or
                 (stock_marker is not None and active_halt is not None)):
             raise BackfillError("Invoice 160059 isolation requires its exact saved halt and 157368 marker")
+    elif isolate_interrupted_stock_failure:
+        if (saved_marker != PENDING_CONTINUATION_MARKER or
+                stock_marker != PENDING_CONTINUATION_160059_MARKER or
+                active_halt is not None):
+            raise BackfillError("Invoice 165534 isolation requires the existing 157368/160059 markers and no active halt")
+    elif isolate_165818_index_failure:
+        if (saved_marker != PENDING_CONTINUATION_MARKER or
+                stock_marker != PENDING_CONTINUATION_160059_MARKER or
+                unauthorized_marker != PENDING_CONTINUATION_161528_MARKER or
+                interrupted_marker != PENDING_CONTINUATION_165534_MARKER or
+                (index_marker is None and
+                 active_halt != PENDING_CONTINUATION_165818_MARKER["halt_reason"]) or
+                (index_marker is not None and active_halt is not None)):
+            raise BackfillError("Invoice 165818 isolation requires its exact halt and prior isolation markers")
+    elif isolate_167764_unauthorized_failure:
+        if (saved_marker != PENDING_CONTINUATION_MARKER or
+                stock_marker != PENDING_CONTINUATION_160059_MARKER or
+                unauthorized_marker != PENDING_CONTINUATION_161528_MARKER or
+                interrupted_marker != PENDING_CONTINUATION_165534_MARKER or
+                index_marker != PENDING_CONTINUATION_165818_MARKER or
+                (unauthorized_167764_marker is None and
+                 active_halt != PENDING_CONTINUATION_167764_MARKER["halt_reason"]) or
+                (unauthorized_167764_marker is not None and active_halt is not None)):
+            raise BackfillError("Invoice 167764 isolation requires its exact halt and prior isolation markers")
+    elif isolate_168436_index_failure:
+        if (saved_marker != PENDING_CONTINUATION_MARKER or
+                stock_marker != PENDING_CONTINUATION_160059_MARKER or
+                unauthorized_marker != PENDING_CONTINUATION_161528_MARKER or
+                interrupted_marker != PENDING_CONTINUATION_165534_MARKER or
+                index_marker != PENDING_CONTINUATION_165818_MARKER or
+                unauthorized_167764_marker != PENDING_CONTINUATION_167764_MARKER or
+                (index_168436_marker is None and
+                 active_halt != PENDING_CONTINUATION_168436_MARKER["halt_reason"]) or
+                (index_168436_marker is not None and active_halt is not None)):
+            raise BackfillError("Invoice 168436 isolation requires its exact halt and prior isolation markers")
+    elif isolate_168777_index_failure:
+        if (saved_marker != PENDING_CONTINUATION_MARKER or
+                stock_marker != PENDING_CONTINUATION_160059_MARKER or
+                unauthorized_marker != PENDING_CONTINUATION_161528_MARKER or
+                interrupted_marker != PENDING_CONTINUATION_165534_MARKER or
+                index_marker != PENDING_CONTINUATION_165818_MARKER or
+                unauthorized_167764_marker != PENDING_CONTINUATION_167764_MARKER or
+                index_168436_marker != PENDING_CONTINUATION_168436_MARKER or
+                (index_168777_marker is None and
+                 active_halt != PENDING_CONTINUATION_168777_MARKER["halt_reason"]) or
+                (index_168777_marker is not None and active_halt is not None)):
+            raise BackfillError("Invoice 168777 isolation requires its exact halt and prior isolation markers")
+    elif isolate_168812_index_failure:
+        if (saved_marker != PENDING_CONTINUATION_MARKER or
+                stock_marker != PENDING_CONTINUATION_160059_MARKER or
+                unauthorized_marker != PENDING_CONTINUATION_161528_MARKER or
+                interrupted_marker != PENDING_CONTINUATION_165534_MARKER or
+                index_marker != PENDING_CONTINUATION_165818_MARKER or
+                unauthorized_167764_marker != PENDING_CONTINUATION_167764_MARKER or
+                index_168436_marker != PENDING_CONTINUATION_168436_MARKER or
+                index_168777_marker != PENDING_CONTINUATION_168777_MARKER or
+                (index_168812_marker is None and
+                 active_halt != PENDING_CONTINUATION_168812_MARKER["halt_reason"]) or
+                (index_168812_marker is not None and active_halt is not None)):
+            raise BackfillError("Invoice 168812 isolation requires its exact halt and prior isolation markers")
+    elif isolate_168905_index_failure:
+        if (saved_marker != PENDING_CONTINUATION_MARKER or
+                stock_marker != PENDING_CONTINUATION_160059_MARKER or
+                unauthorized_marker != PENDING_CONTINUATION_161528_MARKER or
+                interrupted_marker != PENDING_CONTINUATION_165534_MARKER or
+                index_marker != PENDING_CONTINUATION_165818_MARKER or
+                unauthorized_167764_marker != PENDING_CONTINUATION_167764_MARKER or
+                index_168436_marker != PENDING_CONTINUATION_168436_MARKER or
+                index_168777_marker != PENDING_CONTINUATION_168777_MARKER or
+                index_168812_marker != PENDING_CONTINUATION_168812_MARKER or
+                (index_168905_marker is None and
+                 active_halt != PENDING_CONTINUATION_168905_MARKER["halt_reason"]) or
+                (index_168905_marker is not None and active_halt is not None)):
+            raise BackfillError("Invoice 168905 isolation requires its exact halt and prior isolation markers")
     elif stock_marker is not None:
         if active_halt is not None:
             raise BackfillError("A new halt is active; investigate it before continuing")
@@ -904,8 +1488,75 @@ def prepare_pending_continuation(store, isolate_stock_failure=False,
         allowed_failures.add(PENDING_CONTINUATION_160059_MARKER["document_id"])
     if isolate_unauthorized_failure or unauthorized_marker is not None:
         allowed_failures.add(PENDING_CONTINUATION_161528_MARKER["document_id"])
+    interrupted_id = PENDING_CONTINUATION_165534_MARKER["document_id"]
+    interrupted = store.db.execute(
+        "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+        (interrupted_id,)).fetchone()
+    if isolate_interrupted_stock_failure or interrupted_marker is not None:
+        if interrupted is None:
+            raise BackfillError("Saved invoice 165534 isolation row is missing; halt retained")
+        validate_interrupted_165534_isolation(
+            store, interrupted, already_isolated=interrupted_marker is not None)
+        allowed_failures.add(interrupted_id)
+    index_id = PENDING_CONTINUATION_165818_MARKER["document_id"]
+    index_failure = store.db.execute(
+        "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+        (index_id,)).fetchone()
+    if isolate_165818_index_failure or index_marker is not None:
+        if index_failure is None:
+            raise BackfillError("Saved invoice 165818 isolation row is missing; halt retained")
+        validate_165818_index_isolation(store, index_failure)
+        allowed_failures.add(index_id)
+    unauthorized_167764_id = PENDING_CONTINUATION_167764_MARKER["document_id"]
+    unauthorized_167764 = store.db.execute(
+        "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+        (unauthorized_167764_id,)).fetchone()
+    if isolate_167764_unauthorized_failure or unauthorized_167764_marker is not None:
+        if unauthorized_167764 is None:
+            raise BackfillError("Saved invoice 167764 isolation row is missing; halt retained")
+        validate_167764_unauthorized_isolation(store, unauthorized_167764)
+        allowed_failures.add(unauthorized_167764_id)
+    index_168436_id = PENDING_CONTINUATION_168436_MARKER["document_id"]
+    index_168436_failure = store.db.execute(
+        "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+        (index_168436_id,)).fetchone()
+    if isolate_168436_index_failure or index_168436_marker is not None:
+        if index_168436_failure is None:
+            raise BackfillError("Saved invoice 168436 isolation row is missing; halt retained")
+        validate_168436_index_isolation(store, index_168436_failure)
+        allowed_failures.add(index_168436_id)
+    index_168777_id = PENDING_CONTINUATION_168777_MARKER["document_id"]
+    index_168777_failure = store.db.execute(
+        "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+        (index_168777_id,)).fetchone()
+    if isolate_168777_index_failure or index_168777_marker is not None:
+        if index_168777_failure is None:
+            raise BackfillError("Saved invoice 168777 isolation row is missing; halt retained")
+        validate_168777_index_isolation(store, index_168777_failure)
+        allowed_failures.add(index_168777_id)
+    index_168812_id = PENDING_CONTINUATION_168812_MARKER["document_id"]
+    index_168812_failure = store.db.execute(
+        "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+        (index_168812_id,)).fetchone()
+    if isolate_168812_index_failure or index_168812_marker is not None:
+        if index_168812_failure is None:
+            raise BackfillError("Saved invoice 168812 isolation row is missing; halt retained")
+        validate_168812_index_isolation(store, index_168812_failure)
+        allowed_failures.add(index_168812_id)
+    index_168905_id = PENDING_CONTINUATION_168905_MARKER["document_id"]
+    index_168905_failure = store.db.execute(
+        "SELECT * FROM documents WHERE type='invoice' AND zoho_id=?",
+        (index_168905_id,)).fetchone()
+    if isolate_168905_index_failure or index_168905_marker is not None:
+        if index_168905_failure is None:
+            raise BackfillError("Saved invoice 168905 isolation row is missing; halt retained")
+        validate_168905_index_isolation(store, index_168905_failure)
+        allowed_failures.add(index_168905_id)
+    failed_ids = {row["zoho_id"] for row in failed}
+    if isolate_interrupted_stock_failure and interrupted_marker is None:
+        failed_ids.add(interrupted_id)
     if (len(target_157368) != 1 or
-            {row["zoho_id"] for row in failed} != allowed_failures or
+            failed_ids != allowed_failures or
             not target_157368[0]["original"] or
             target_157368[0]["error"] != PENDING_CONTINUATION_MARKER["failure"]):
         raise BackfillError("Continuation requires only the explicitly isolated failed invoices; halt retained")
@@ -1027,7 +1678,14 @@ def prepare_pending_continuation(store, isolate_stock_failure=False,
 
     if (saved_marker is None or
             (isolate_stock_failure and stock_marker is None) or
-            (isolate_unauthorized_failure and unauthorized_marker is None)):
+            (isolate_unauthorized_failure and unauthorized_marker is None) or
+            (isolate_interrupted_stock_failure and interrupted_marker is None) or
+            (isolate_165818_index_failure and index_marker is None) or
+            (isolate_167764_unauthorized_failure and unauthorized_167764_marker is None) or
+            (isolate_168436_index_failure and index_168436_marker is None) or
+            (isolate_168777_index_failure and index_168777_marker is None) or
+            (isolate_168812_index_failure and index_168812_marker is None) or
+            (isolate_168905_index_failure and index_168905_marker is None)):
         with store.db:
             if saved_marker is None:
                 store.put(PENDING_CONTINUATION_KEY, PENDING_CONTINUATION_MARKER)
@@ -1038,6 +1696,40 @@ def prepare_pending_continuation(store, isolate_stock_failure=False,
             if isolate_unauthorized_failure and unauthorized_marker is None:
                 store.put(PENDING_CONTINUATION_161528_KEY,
                           PENDING_CONTINUATION_161528_MARKER)
+                store.put("halted", None)
+            if isolate_interrupted_stock_failure and interrupted_marker is None:
+                updated = store.db.execute(
+                    "UPDATE documents SET status='failed',error=? "
+                    "WHERE type='invoice' AND zoho_id=? AND status='updating'",
+                    (PENDING_CONTINUATION_165534_MARKER["failure"], interrupted_id))
+                if updated.rowcount != 1:
+                    raise BackfillError("Invoice 165534 state changed during isolation; halt retained")
+                store.put(PENDING_CONTINUATION_165534_KEY,
+                          PENDING_CONTINUATION_165534_MARKER)
+            if isolate_165818_index_failure and index_marker is None:
+                store.put(PENDING_CONTINUATION_165818_KEY,
+                          PENDING_CONTINUATION_165818_MARKER)
+                store.put("halted", None)
+            if (isolate_167764_unauthorized_failure and
+                    unauthorized_167764_marker is None):
+                store.put(PENDING_CONTINUATION_167764_KEY,
+                          PENDING_CONTINUATION_167764_MARKER)
+                store.put("halted", None)
+            if isolate_168436_index_failure and index_168436_marker is None:
+                store.put(PENDING_CONTINUATION_168436_KEY,
+                          PENDING_CONTINUATION_168436_MARKER)
+                store.put("halted", None)
+            if isolate_168777_index_failure and index_168777_marker is None:
+                store.put(PENDING_CONTINUATION_168777_KEY,
+                          PENDING_CONTINUATION_168777_MARKER)
+                store.put("halted", None)
+            if isolate_168812_index_failure and index_168812_marker is None:
+                store.put(PENDING_CONTINUATION_168812_KEY,
+                          PENDING_CONTINUATION_168812_MARKER)
+                store.put("halted", None)
+            if isolate_168905_index_failure and index_168905_marker is None:
+                store.put(PENDING_CONTINUATION_168905_KEY,
+                          PENDING_CONTINUATION_168905_MARKER)
                 store.put("halted", None)
 
 
@@ -1055,8 +1747,11 @@ def progress_line(checked, batch_total, summary):
             .format(checked, batch_total, verified, total, percent, summary["pending"]))
 
 
-def should_verify_investigated_invoice(continue_pending, reconcile_stock_only, journal_exists):
-    return not ((continue_pending or reconcile_stock_only) and journal_exists)
+def should_verify_investigated_invoice(continue_pending, reconcile_stock_only,
+                                       journal_exists, reconcile_read_failure=False,
+                                       reconcile_manual_branch=False):
+    return not ((continue_pending or reconcile_stock_only or reconcile_read_failure or
+                 reconcile_manual_branch) and journal_exists)
 
 
 def main():
@@ -1070,8 +1765,22 @@ def main():
                       help="Explicitly isolate the investigated 160059 failure, then process pending invoices only")
     mode.add_argument("--isolate-161528-and-continue", action="store_true",
                       help="Isolate the saved 161528 authorization rejection, then process pending invoices only")
+    mode.add_argument("--isolate-165534-and-continue", action="store_true",
+                      help="Keep interrupted invoice 165534 failed and unverified, then process pending invoices only")
+    mode.add_argument("--isolate-165818-and-continue", action="store_true",
+                      help="Keep invoice 165818 failed and unverified after its exact index-only difference, then process pending invoices")
+    mode.add_argument("--isolate-167764-and-continue", action="store_true",
+                      help="Keep invoice 167764 failed and unverified after its exact authorization rejection, then process pending invoices")
+    mode.add_argument("--isolate-168436-and-continue", action="store_true",
+                      help="Keep invoice 168436 failed and unverified after its exact index shifts, then process pending invoices")
+    mode.add_argument("--isolate-168777-and-continue", action="store_true",
+                      help="Keep invoice 168777 failed and unverified after its exact index-only difference, then process pending invoices")
+    mode.add_argument("--isolate-168812-and-continue", action="store_true",
+                      help="Keep invoice 168812 failed and unverified after its exact index-only difference, then process pending invoices")
+    mode.add_argument("--isolate-168905-and-continue", action="store_true",
+                      help="Keep invoice 168905 failed and unverified after its exact index-only difference, then process pending invoices")
     mode.add_argument("--reconcile-read-failure", action="store_true",
-                      help="Read and verify the single successful write halted by exhausted read retries")
+                      help="Read and verify a single successful or uncertain write halted by exhausted read retries")
     mode.add_argument("--reconcile-429", action="store_true",
                       help="Fresh-read invoice 156416 and retry only if its branch is blank and business data is unchanged")
     mode.add_argument("--reconcile-omitted-field", action="store_true",
@@ -1091,7 +1800,14 @@ def main():
                         help="Request cap 1..90; default 90 (previously 85)")
     args = parser.parse_args()
     continue_pending = (args.continue_pending or args.isolate_160059_and_continue or
-                       args.isolate_161528_and_continue)
+                       args.isolate_161528_and_continue or
+                       args.isolate_165534_and_continue or
+                       args.isolate_165818_and_continue or
+                       args.isolate_167764_and_continue or
+                       args.isolate_168436_and_continue or
+                       args.isolate_168777_and_continue or
+                       args.isolate_168812_and_continue or
+                       args.isolate_168905_and_continue)
     if args.limit is None:
         args.limit = 100 if continue_pending else 14450
     if not 1 <= args.limit <= 14450:
@@ -1122,7 +1838,8 @@ def main():
                                         cfg["CF_INVOICE_ID"], "invoice")
         old_row, original = json.loads(old[0]), json.loads(old[1])
         if should_verify_investigated_invoice(
-                continue_pending, args.reconcile_stock_only, invoice_journal.is_file()):
+                continue_pending, args.reconcile_stock_only, invoice_journal.is_file(),
+                args.reconcile_read_failure, args.reconcile_manual_branch):
             repaired = client.read(old_row)
             if (projection(original, cfg["CF_INVOICE_ID"], schema) != projection(repaired, cfg["CF_INVOICE_ID"], schema) or
                     branch_value(repaired, cfg["CF_INVOICE_ID"]) != old_row["branch_record_id"]):
@@ -1166,7 +1883,14 @@ def main():
             if continue_pending:
                 prepare_pending_continuation(
                     store, isolate_stock_failure=args.isolate_160059_and_continue,
-                    isolate_unauthorized_failure=args.isolate_161528_and_continue)
+                    isolate_unauthorized_failure=args.isolate_161528_and_continue,
+                    isolate_interrupted_stock_failure=args.isolate_165534_and_continue,
+                    isolate_165818_index_failure=args.isolate_165818_and_continue,
+                    isolate_167764_unauthorized_failure=args.isolate_167764_and_continue,
+                    isolate_168436_index_failure=args.isolate_168436_and_continue,
+                    isolate_168777_index_failure=args.isolate_168777_and_continue,
+                    isolate_168812_index_failure=args.isolate_168812_and_continue,
+                    isolate_168905_index_failure=args.isolate_168905_and_continue)
             else:
                 marker = store.get(PENDING_CONTINUATION_KEY)
                 if marker == PENDING_CONTINUATION_MARKER:
@@ -1241,6 +1965,20 @@ def main():
                     isolated_numbers.append("160059")
                 if store.get(PENDING_CONTINUATION_161528_KEY) == PENDING_CONTINUATION_161528_MARKER:
                     isolated_numbers.append("161528")
+                if store.get(PENDING_CONTINUATION_165534_KEY) == PENDING_CONTINUATION_165534_MARKER:
+                    isolated_numbers.append("165534")
+                if store.get(PENDING_CONTINUATION_165818_KEY) == PENDING_CONTINUATION_165818_MARKER:
+                    isolated_numbers.append("165818")
+                if store.get(PENDING_CONTINUATION_167764_KEY) == PENDING_CONTINUATION_167764_MARKER:
+                    isolated_numbers.append("167764")
+                if store.get(PENDING_CONTINUATION_168436_KEY) == PENDING_CONTINUATION_168436_MARKER:
+                    isolated_numbers.append("168436")
+                if store.get(PENDING_CONTINUATION_168777_KEY) == PENDING_CONTINUATION_168777_MARKER:
+                    isolated_numbers.append("168777")
+                if store.get(PENDING_CONTINUATION_168812_KEY) == PENDING_CONTINUATION_168812_MARKER:
+                    isolated_numbers.append("168812")
+                if store.get(PENDING_CONTINUATION_168905_KEY) == PENDING_CONTINUATION_168905_MARKER:
+                    isolated_numbers.append("168905")
                 isolated_text = " and ".join(isolated_numbers)
                 if summary["pending"]:
                     print("Invoices " + isolated_text + " remain failed and isolated. "

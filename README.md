@@ -56,12 +56,54 @@ To bound an invocation to 100 unfinished rows:
 .\.venv\Scripts\python.exe run_invoice_backfill.py --run --limit 100
 ```
 
-### Continue while invoices 157368, 160059, and 161528 remain unresolved
+### Continue while specific invoices remain unresolved
 
-Invoice 157368 has a saved HTTP 401 failure and an unresolved branch field. Invoice 160059 has a successful branch write, but later reads showed customer-balance and stock changes beyond the narrow reconciliation that was approved. Invoice 161528 received an HTTP 401/code 57 rejection and its branch remains blank. These invoices must not be retried or counted as complete. Each isolation option validates the exact saved evidence before excluding that invoice; the options also clear only the matching saved halt. The 161528 isolation additionally requires both prior 157368 and 160059 isolation markers. Pending-only runs process `pending` rows only, with no overall verified-invoice target. Each invocation remains bounded by `--limit` (default: 100). To isolate 161528 and continue:
+Invoice 157368 has a saved HTTP 401 failure and an unresolved branch field. Invoice 160059 has a successful branch write, but later reads showed customer-balance and stock changes beyond the narrow reconciliation that was approved. Invoices 161528 and 167764 received HTTP 401/code 57 rejections and their branches remain blank. Invoice 165534 has an interrupted write whose saved readback matches the mapped branch, but also has stock-field differences on line items 0 and 1. Invoice 165818 has a successful write and a readback matching the mapped branch, but its only recorded difference is `/custom_fields/0/index`; its original branch field was omitted from the invoice response and read blank through the lookup endpoint. Invoice 168436 has a successful write and a readback matching the mapped branch, but its only differences are six custom-field indices shifting by one. Invoices 168777, 168812, and 168905 have successful writes and readbacks matching the mapped branches, but each has only `/custom_fields/0/index` changing from 1 to 2. These invoices must not be retried or counted as complete. Each isolation option validates its specific saved evidence before excluding that invoice, and clears only the matching saved halt. Isolation of 161528 and 165534 requires the prior 157368 and 160059 markers; isolation of 165818 requires the prior 161528 and 165534 markers; isolation of 167764 requires all preceding markers through 165818; isolation of 168436 requires all preceding markers through 167764; isolation of 168777 requires all preceding markers through 168436; isolation of 168812 requires all preceding markers through 168777; isolation of 168905 requires all preceding markers through 168812 and its exact active halt. Pending-only runs process `pending` rows only, with no overall verified-invoice target. Each invocation remains bounded by `--limit` (default: 100). To isolate 161528 and continue:
 
 ```powershell
 .\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-161528-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For the interrupted invoice 165534, validate and preserve its exact saved request/readback evidence, keep it failed and unverified, then continue other pending invoices:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-165534-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For invoice 165818, validate that the saved request, successful response, blank lookup, mapped-branch readback, and sole index difference are unchanged. Keep it failed and unverified, then continue other pending invoices:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-165818-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For invoice 167764, validate the exact saved 401/code 57 rejection, blank branch readbacks, and unchanged protected data. Keep it failed and unverified, then continue other pending invoices:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-167764-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For invoice 168436, validate the successful write, mapped-branch readback, and exact six index shifts. Keep it failed and unverified, then continue other pending invoices:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-168436-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For invoice 168777, validate the successful write, mapped-branch readback, and exact single index change from 1 to 2. Keep it failed and unverified, then continue other pending invoices:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-168777-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For invoice 168812, validate the successful write, mapped-branch readback, and exact single index change from 1 to 2. Keep it failed and unverified, then continue other pending invoices:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-168812-and-continue --limit 7888 --requests-per-minute 90
+```
+
+For invoice 168905, validate the successful write, mapped-branch readback, and exact single index change from 1 to 2. Keep it failed and unverified, then continue other pending invoices:
+
+```powershell
+.\.venv\Scripts\python.exe run_invoice_backfill.py --isolate-168905-and-continue --limit 7888 --requests-per-minute 90
 ```
 
 For subsequent bounded batches, use:
@@ -70,7 +112,7 @@ For subsequent bounded batches, use:
 .\.venv\Scripts\python.exe run_invoice_backfill.py --continue-pending --limit 7888 --requests-per-minute 90
 ```
 
-Any other failed invoice or different active halt stops continuation. Do not use `--run` while an isolated failure remains. None of the three invoices is counted as complete; resolve and reconcile them separately before declaring the invoice backfill complete.
+Any other failed invoice or different active halt stops continuation. Do not use `--run` while an isolated failure remains. None of these nine invoices is counted as complete; resolve and reconcile them separately before declaring the invoice backfill complete.
 
 If a later invoice hits the daily quota halt, wait until the allowance is restored and reconcile that invoice with `--reconcile-429`; then resume with `--continue-pending`.
 
@@ -225,7 +267,7 @@ For the **specific old halt** `Read failed after bounded retries`, this controll
 .\.venv\Scripts\python.exe run_invoice_backfill.py --reconcile-read-failure
 ```
 
-It requires exactly one saved attempted invoice, its expected request and a successful write response. It reads without rewriting the invoice. Verified branch and unchanged business data allow it to back up the invoice journal, mark the row verified and atomically clear that specific halt.
+It requires exactly one saved attempted invoice and its exact expected request. It accepts either a successful write response or the exact saved uncertain-network-error evidence with a blank pre-write lookup. In both cases it performs a fresh read without rewriting the invoice. Only a mapped-branch match and unchanged protected business data allow it to back up the journal, mark the row verified and atomically clear this halt. If the read is inconclusive, the halt remains and no retry is sent.
 
 For the specific uncertain HTTP 429 attempt on invoice **156416**, after Zoho access and allowance are restored, use this guarded recovery:
 
