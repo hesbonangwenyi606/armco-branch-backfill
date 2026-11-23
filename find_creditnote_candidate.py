@@ -1,11 +1,13 @@
 """Read-only, bounded search for a mapped credit note with an existing invoice link."""
 import argparse
+from collections import Counter
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
 import time
 
-from backfill_customer_branch import (BackfillError, Client, branch_value, dumps,
+from backfill_customer_branch import (APIError, BackfillError, Client, branch_value, dumps,
     load_map, numeric, settings, validate_lookup_schema)
 
 
@@ -31,21 +33,49 @@ def classify(doc, field_id, schema):
     return "branch_present" if value else "candidate_requires_guarded_test"
 
 
+def write_progress(folder, records, total, status):
+    counts = Counter(record["status"] for record in records)
+    checked = len(records) - counts["read_failed"]
+    lines = ["# Credit-note candidate scan", "",
+             "Checked (UTC): " + datetime.now(timezone.utc).isoformat(), "",
+             f"Status: **{status}**", "",
+             f"Successfully checked: **{checked} / {total}**", "",
+             f"Remaining in this scan: {total - checked}", "",
+             f"Missing invoice association: {counts['missing_invoice_association']}",
+             f"Missing invoice number: {counts['missing_invoice_number']}",
+             f"Void: {counts['void_creditnote']}",
+             f"Branch already present: {counts['branch_present']}",
+             f"Candidates found: {counts['candidate_requires_guarded_test']}",
+             f"Read failures: {counts['read_failed']}", "",
+             "This is a read-only candidate search, not a credit-note update.", ""]
+    (folder / "progress.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def scan(client, rows, schema, folder, limit):
     records = []
     candidate = None
+    total = min(len(rows), limit)
+    write_progress(folder, records, total, "Running")
     for row in rows[:limit]:
         try:
             doc = client.read(row)
             state = classify(doc, schema["field_id"], schema)
         except BackfillError as error:
             # Stop on API errors rather than burning the remaining allowance.
-            records.append({"number": row["number"], "document_id": row["zoho_id"],
-                            "status": "read_failed", "error": str(error)})
+            record = {"number": row["number"], "document_id": row["zoho_id"],
+                      "status": "read_failed", "error": str(error)}
+            if isinstance(error, APIError) and isinstance(error.body, dict):
+                code = error.body.get("code")
+                if type(code) is int:
+                    record["api_code"] = code
+                    print("Zoho API error code: " + str(code), flush=True)
+            records.append(record)
             (folder / "report.json").write_text(dumps(records) + "\n", encoding="utf-8")
+            write_progress(folder, records, total, "Stopped on read failure")
             raise
         records.append({"number": row["number"], "document_id": row["zoho_id"], "status": state})
         (folder / "report.json").write_text(dumps(records) + "\n", encoding="utf-8")
+        write_progress(folder, records, total, "Running")
         if state == "candidate_requires_guarded_test":
             candidate = {"mapping": row, "invoice_id": doc["invoice_id"],
                          "invoice_number": doc["invoice_number"], "schema": schema}
@@ -62,6 +92,7 @@ def scan(client, rows, schema, folder, limit):
     else:
         summary["note"] = "No suitable candidate in this bounded sample; no documents changed"
     (folder / "summary.json").write_text(dumps(summary) + "\n", encoding="utf-8")
+    write_progress(folder, records, total, "Candidate found" if candidate else "Scan complete")
     print(dumps(summary), flush=True)
     return summary
 
@@ -88,6 +119,7 @@ def main():
         "organisation_id": cfg["ZOHO_ORG_ID"], "api": cfg["ZOHO_API"],
         "skip": args.skip, "limit": args.limit}) + "\n", encoding="utf-8")
     print("Read-only search started; progress prints every 10 credit notes.", flush=True)
+    print("Live progress: " + str(folder / "progress.md"), flush=True)
     scan(client, selected, schema, folder, args.limit)
 
 
