@@ -55,7 +55,7 @@ def progress(db, total):
     lines = ["# Credit-note batch progress", "", "Checked (UTC): " + datetime.now(timezone.utc).isoformat(), "",
              "Candidate list size: " + str(total), "", "Verified updates: " + str(counts.get("verified", 0)),
              "Already present: " + str(counts.get("already_present", 0)),
-             "Attempted or failed: " + str(counts.get("attempting", 0) + counts.get("failed", 0)), "",
+             "Attempted or failed: " + str(counts.get("attempting", 0) + counts.get("failed", 0) + counts.get("isolated", 0)), "",
              "This report covers the candidate list only, not all mapped credit notes.", ""]
     (ROOT / "progress.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -63,6 +63,7 @@ def progress(db, total):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=1, help="Maximum candidates checked in this invocation")
+    parser.add_argument("--continue-all", action="store_true", help="Continue through all remaining candidates, stopping on any error")
     args = parser.parse_args()
     if not 1 <= args.limit <= 100:
         raise BackfillError("Use --limit between 1 and 100")
@@ -95,12 +96,18 @@ def main():
         db.commit()
         if db.execute("SELECT 1 FROM attempts WHERE status IN ('attempting','failed') LIMIT 1").fetchone():
             raise BackfillError("Unresolved attempted or failed record; inspect the journal before proceeding")
-        client = Client(cfg)
+        isolated = db.execute("SELECT number, evidence FROM attempts WHERE status='isolated'").fetchall()
+        for number, raw_evidence in isolated:
+            item = json.loads(raw_evidence)
+            if number != 'CN030192' or item.get('isolation') != 'CN030192_401_code57':
+                raise BackfillError('Unexpected isolated credit note; inspect the journal before proceeding')
+        # Match the existing 90 requests/minute ceiling used by the invoice runner.
+        client = Client(cfg, delay=60 / 90, requests_per_minute=90)
         schema = validate_lookup_schema(client.request("GET", "/settings/fields", query={"entity": "creditnote"}), FIELD, "creditnote")
         progress(db, len(candidates))
         processed = 0
         for c in candidates:
-            if processed >= args.limit:
+            if not args.continue_all and processed >= args.limit:
                 break
             if db.execute("SELECT 1 FROM attempts WHERE id=?", (c["creditnote_id"],)).fetchone():
                 continue
@@ -143,7 +150,7 @@ def main():
                     db.commit()
                 processed += 1
                 progress(db, len(candidates))
-                print(dumps({"number": cn["number"], "checked_in_batch": processed, "limit": args.limit}), flush=True)
+                print(dumps({"number": cn["number"], "checked_in_batch": processed, "limit": "all" if args.continue_all else args.limit}), flush=True)
             except (BackfillError, OSError, ValueError) as exc:
                 evidence["error"] = str(exc)
                 if isinstance(exc, APIError):
